@@ -6,6 +6,17 @@ A novel agentic memory system for LLM agents that can dynamically organize memor
 
 For more details, please refer to our paper: [A-Mem: Agentic Memory for LLM Agents](https://arxiv.org/pdf/2502.12110)
 
+## Reproduction Fork Notes
+
+This public fork is a reproduction-oriented extension of [WujiangXu/A-mem](https://github.com/WujiangXu/A-mem). It keeps the original reproduction code and adds local experiment helpers for:
+
+- robust text-only evaluation without OpenAI JSON schema dependency;
+- Ollama-based retrieval-k sweeps;
+- fixed-memory embedding-field ablations;
+- `uv`-based environment setup for easier lab sharing.
+
+Generated caches, logs, and result files are intentionally not committed. Run the commands below to generate them locally.
+
 ## Introduction 🌟
 
 Large Language Model (LLM) agents have demonstrated remarkable capabilities in handling complex real-world tasks through external tool usage. However, to effectively leverage historical experiences, they require sophisticated memory systems. Traditional memory systems, while providing basic storage and retrieval functionality, often lack advanced memory organization capabilities.
@@ -58,7 +69,40 @@ cd AgenticMemory
 ```
 
 2. Install dependencies:
-Option 1: Using venv (Python virtual environment)
+Option 1: Using uv (recommended for this fork)
+```bash
+uv sync
+```
+
+Run the non-LLM tests:
+```bash
+uv run pytest test_ablation.py -v
+```
+
+Run a small Ollama smoke evaluation:
+```bash
+ollama serve
+ollama pull llama3.2:1b
+uv run test_advanced_robust.py \
+    --backend ollama \
+    --model llama3.2:1b \
+    --dataset data/locomo10.json \
+    --ratio 0.1 \
+    --retrieve_k 5 \
+    --output smoke_ollama.json
+```
+
+Run an Ollama retrieval-k sweep:
+```bash
+bash scripts/k_sweep_ollama.sh --model llama3.2:1b --k-values "5 10 15"
+```
+
+Run the embedding-field ablation after memory caches have been created:
+```bash
+bash run_ablation_core7_k5.sh
+```
+
+Option 2: Using venv (Python virtual environment)
 ```bash
 # Create and activate virtual environment
 python -m venv a-mem
@@ -146,5 +190,4 @@ If you use this code in your research, please cite our work:
 ## License 📄
 
 This project is licensed under the MIT License. See LICENSE for details.
-
 

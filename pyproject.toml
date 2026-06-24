@@ -1,0 +1,25 @@
+[project]
+name = "a-mem"
+version = "0.1.0"
+description = "A-Mem reproduction fork with robust evaluation and ablation helpers"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "bert-score>=0.3.13",
+    "litellm>=1.88.1",
+    "nltk>=3.9.4",
+    "numpy>=2.4.6",
+    "ollama>=0.6.2",
+    "openai>=2.41.1",
+    "pandas>=3.0.3",
+    "pathlib>=1.0.1",
+    "pytest>=9.0.3",
+    "python-dotenv>=1.2.2",
+    "rank-bm25>=0.2.2",
+    "rouge-score>=0.1.2",
+    "scikit-learn>=1.9.0",
+    "sentence-transformers>=5.5.1",
+    "torch>=2.12.0",
+    "tqdm>=4.68.2",
+    "transformers>=5.12.0",
+]

@@ -1,0 +1,21 @@
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration
+.env
+.env.*
+
+# Reproduction-generated artifacts
+cached_memories*/
+logs/
+results_*.json
+results_*/
+output/
+
+# Large/reference documents should be linked from README instead.
+*.pdf

@@ -237,11 +237,19 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         else:
             eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
 
-            for _, turns in sample.conversation.sessions.items():
-                for turn in turns.turns:
-                    turn_datatime = turns.date_time
+            # 先統計 turn 總數，讓 tqdm 能顯示正確進度
+            all_turns = [
+                (turns.date_time, turn)
+                for _, turns in sample.conversation.sessions.items()
+                for turn in turns.turns
+            ]
+            with tqdm(all_turns, desc=f"[Sample {sample_idx}] Building memories",
+                      unit="turn", dynamic_ncols=True) as pbar:
+                for turn_datatime, turn in pbar:
                     conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
                     agent.add_memory(conversation_tmp, time=turn_datatime)
+                    mem_count = len(agent.memory_system.memories)
+                    pbar.set_postfix(memories=mem_count)
 
             memories_to_cache = agent.memory_system.memories
             with open(memory_cache_file, 'wb') as f:
@@ -251,10 +259,13 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
-        for qa in sample.qa:
-            if int(qa.category) in allow_categories:
+        eligible_qas = [qa for qa in sample.qa if int(qa.category) in allow_categories]
+        with tqdm(eligible_qas, desc=f"[Sample {sample_idx}] Answering QAs",
+                  unit="qa", dynamic_ncols=True) as pbar:
+            for qa in pbar:
                 total_questions += 1
                 category_counts[qa.category] += 1
+                pbar.set_postfix(cat=qa.category, total=total_questions)
 
                 prediction, user_prompt, raw_context = agent.answer_question(
                     qa.question, qa.category, qa.final_answer
