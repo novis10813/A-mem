@@ -158,7 +158,118 @@ def _is_artifact_token(token: str) -> bool:
     return token.endswith("says")
 
 
+# ---------------------------------------------------------------------------
+# Keyword pruning mode
+# ---------------------------------------------------------------------------
+
+# Global pruning mode: "simple" (no stemming) or "nltk" (with PorterStemmer)
+# Set via set_keyword_pruning_mode() or by importing and assigning directly.
+_KEYWORD_PRUNING_MODE: str = "nltk"
+
+
+def set_keyword_pruning_mode(mode: str) -> None:
+    """Set the global keyword pruning mode.
+
+    Args:
+        mode: "simple" for stopword/grounding-only filtering (no stemming),
+              "nltk" for full KEA-style filtering with PorterStemmer stemming.
+    """
+    global _KEYWORD_PRUNING_MODE
+    if mode not in ("simple", "nltk"):
+        raise ValueError(f"Unknown keyword pruning mode: {mode!r}. Use 'simple' or 'nltk'.")
+    _KEYWORD_PRUNING_MODE = mode
+
+
+def _token_is_grounded_simple(token: str, content_tokens: set) -> bool:
+    """Grounding check WITHOUT stemming (exact token match only)."""
+    return token in content_tokens
+
+
+def sanitize_keywords_simple(
+    content: str,
+    keywords: Any,
+    max_keywords: int = 5,
+) -> List[str]:
+    """Prune noisy LLM keywords using simple rule filtering (no NLTK stemming).
+
+    Applies the same stopword/generic/filler filtering and content-grounding
+    check as sanitize_keywords(), but uses EXACT token matching for grounding
+    instead of NLTK PorterStemmer derivational-variant matching.
+    """
+    if isinstance(keywords, str):
+        candidates = _parse_list_items(keywords)
+    elif isinstance(keywords, list):
+        candidates = keywords
+    else:
+        return []
+
+    # Build simple token index (no stemmed variants)
+    content_tokens = set(_keyword_tokens(content or ""))
+    content_lower = (content or "").lower()
+    seen = set()
+    filtered = []
+
+    for raw_keyword in candidates:
+        keyword = _normalize_keyword(raw_keyword)
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+
+        tokens = _keyword_tokens(keyword)
+        if any(_is_artifact_token(t) for t in tokens):
+            continue
+        if any(t in KEYWORD_HARD_FILTER_TERMS for t in tokens):
+            continue
+        meaningful_tokens = [t for t in tokens if t not in KEYWORD_FILTER_TERMS]
+        if not meaningful_tokens:
+            continue
+        if len(meaningful_tokens) == 1 and meaningful_tokens[0] in KEYWORD_GENERIC_TERMS:
+            continue
+        # Exact-match grounding (no stemming)
+        if content_tokens and not all(_token_is_grounded_simple(t, content_tokens) for t in meaningful_tokens):
+            continue
+
+        filtered.append((keyword, meaningful_tokens))
+
+    kept = []
+    for keyword, tokens in sorted(filtered, key=lambda item: (-len(item[1]), item[0])):
+        token_set = set(tokens)
+        if any(token_set < set(existing_tokens) for _, existing_tokens in kept):
+            continue
+        kept.append((keyword, tokens))
+
+    def score(item):
+        keyword, tokens = item
+        frequency = sum(content_lower.count(token) for token in tokens)
+        first_positions = [
+            content_lower.find(token)
+            for token in tokens
+            if content_lower.find(token) >= 0
+        ]
+        first_pos = min(first_positions) if first_positions else len(content_lower) + 1
+        phrase_bonus = min(len(tokens), 3)
+        return (-frequency, -phrase_bonus, first_pos, keyword)
+
+    ranked = sorted(kept, key=score)
+    return [keyword for keyword, _ in ranked[:max_keywords]]
+
+
 def sanitize_keywords(
+    content: str,
+    keywords: Any,
+    max_keywords: int = 5,
+) -> List[str]:
+    """Dispatch to pruning implementation based on _KEYWORD_PRUNING_MODE.
+
+    "simple" -> sanitize_keywords_simple() (exact-match grounding, no stemming)
+    "nltk"   -> _sanitize_keywords_nltk()  (PorterStemmer grounding)
+    """
+    if _KEYWORD_PRUNING_MODE == "simple":
+        return sanitize_keywords_simple(content, keywords, max_keywords)
+    return _sanitize_keywords_nltk(content, keywords, max_keywords)
+
+
+def _sanitize_keywords_nltk(
     content: str,
     keywords: Any,
     max_keywords: int = 5,

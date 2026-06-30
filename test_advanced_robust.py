@@ -8,10 +8,12 @@ Usage:
 """
 
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
+import llm_text_parsers as _ltp
 from llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
     parse_keywords_response,
+    set_keyword_pruning_mode,
 )
 import os
 import json
@@ -174,16 +176,21 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
 def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None,
                      ratio: float = 1.0, backend: str = "sglang",
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
-                     sglang_host: str = "http://localhost", sglang_port: int = 30000):
+                     sglang_host: str = "http://localhost", sglang_port: int = 30000,
+                     keyword_pruning_mode: str = "nltk"):
     """Evaluate the robust agent on the LoComo dataset."""
+    # Configure keyword pruning mode before any memory operations
+    set_keyword_pruning_mode(keyword_pruning_mode)
+
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
+    log_filename = f"eval_robust_{model}_{backend}_kp{keyword_pruning_mode}_ratio{ratio}_{timestamp}.log"
     log_path = os.path.join(os.path.dirname(__file__), "logs", log_filename)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     eval_logger = setup_logger(log_path)
     eval_logger.info(f"Loading dataset from {dataset_path}")
     eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
+    eval_logger.info(f"Keyword pruning mode: {keyword_pruning_mode}")
 
     samples = load_locomo_dataset(dataset_path)
     eval_logger.info(f"Loaded {len(samples)} samples")
@@ -203,7 +210,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     error_num = 0
     memories_dir = os.path.join(
         os.path.dirname(__file__),
-        "cached_memories_robust_{}_{}".format(backend, model),
+        "cached_memories_robust_{}_{}_{}".format(backend, model, keyword_pruning_mode),
     )
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
@@ -309,6 +316,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "model": model,
         "dataset": dataset_path,
         "memory_layer": "robust",
+        "keyword_pruning_mode": keyword_pruning_mode,
         "total_questions": total_questions,
         "category_distribution": {
             str(cat): count for cat, count in category_counts.items()
@@ -362,6 +370,10 @@ def main():
                         help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
                         help="SGLang server port (for sglang backend)")
+    parser.add_argument("--keyword_pruning_mode", type=str, default="nltk",
+                        choices=["simple", "nltk"],
+                        help="Keyword pruning mode: 'simple' (exact-match, no NLTK stemming) "
+                             "or 'nltk' (PorterStemmer derivational-variant matching)")
     args = parser.parse_args()
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
@@ -374,6 +386,7 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port,
+        args.keyword_pruning_mode,
     )
 
 
