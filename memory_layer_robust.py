@@ -385,10 +385,8 @@ class RobustAgenticMemorySystem:
         evo_label, note = self.process_memory(note)
         self.memories[note.id] = note
         self.retriever.add_documents([
-            "content:" + note.content +
-            " context:" + note.context +
-            " keywords: " + ", ".join(note.keywords) +
-            " tags: " + ", ".join(note.tags)
+            note.context +
+            " keywords: " + ", ".join(note.keywords)
         ])
         if evo_label:
             self.evo_cnt += 1
@@ -405,8 +403,9 @@ class RobustAgenticMemorySystem:
 
         self.retriever = SimpleEmbeddingRetriever(model_name)
         for memory in self.memories.values():
-            metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
-            self.retriever.add_documents([memory.content + " , " + metadata_text])
+            self.retriever.add_documents([
+                memory.context + " keywords: " + ", ".join(memory.keywords)
+            ])
 
     def find_related_memories(self, query: str, k: int = 5) -> tuple:
         """Find related memories using embedding retrieval."""
