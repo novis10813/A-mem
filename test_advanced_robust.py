@@ -371,8 +371,9 @@ def main():
     parser.add_argument("--sglang_port", type=int, default=30000,
                         help="SGLang server port (for sglang backend)")
     parser.add_argument("--keyword_pruning_mode", type=str, default="nltk",
-                        choices=["simple", "nltk"],
-                        help="Keyword pruning mode: 'simple' (exact-match, no NLTK stemming) "
+                        choices=["none", "simple", "nltk"],
+                        help="Keyword pruning mode: 'none' (raw LLM keywords, no filtering), "
+                             "'simple' (exact-match grounding, no NLTK stemming), "
                              "or 'nltk' (PorterStemmer derivational-variant matching)")
     args = parser.parse_args()
 

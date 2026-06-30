@@ -171,18 +171,50 @@ def set_keyword_pruning_mode(mode: str) -> None:
     """Set the global keyword pruning mode.
 
     Args:
-        mode: "simple" for stopword/grounding-only filtering (no stemming),
-              "nltk" for full KEA-style filtering with PorterStemmer stemming.
+        mode: "none"   - no filtering; normalize + deduplicate only (raw LLM output)
+              "simple" - stopword/generic/filler filtering + exact-match grounding (no stemming)
+              "nltk"   - full KEA-style filtering with PorterStemmer derivational-variant matching
     """
     global _KEYWORD_PRUNING_MODE
-    if mode not in ("simple", "nltk"):
-        raise ValueError(f"Unknown keyword pruning mode: {mode!r}. Use 'simple' or 'nltk'.")
+    if mode not in ("none", "simple", "nltk"):
+        raise ValueError(f"Unknown keyword pruning mode: {mode!r}. Use 'none', 'simple', or 'nltk'.")
     _KEYWORD_PRUNING_MODE = mode
 
 
 def _token_is_grounded_simple(token: str, content_tokens: set) -> bool:
     """Grounding check WITHOUT stemming (exact token match only)."""
     return token in content_tokens
+
+
+def sanitize_keywords_none(
+    content: str,
+    keywords: Any,
+    max_keywords: int = 5,
+) -> List[str]:
+    """Pass-through pruning: normalize and deduplicate only, no filtering.
+
+    This is the baseline/control condition: the raw LLM-generated keywords are
+    kept as-is (modulo normalization and capping to max_keywords). No stopword
+    removal, no grounding check, no stemming.
+    """
+    if isinstance(keywords, str):
+        candidates = _parse_list_items(keywords)
+    elif isinstance(keywords, list):
+        candidates = keywords
+    else:
+        return []
+
+    seen: set = set()
+    result: List[str] = []
+    for raw_keyword in candidates:
+        keyword = _normalize_keyword(raw_keyword)
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+        result.append(keyword)
+        if len(result) >= max_keywords:
+            break
+    return result
 
 
 def sanitize_keywords_simple(
@@ -261,9 +293,12 @@ def sanitize_keywords(
 ) -> List[str]:
     """Dispatch to pruning implementation based on _KEYWORD_PRUNING_MODE.
 
+    "none"   -> sanitize_keywords_none()   (normalize + dedup only, no filtering)
     "simple" -> sanitize_keywords_simple() (exact-match grounding, no stemming)
     "nltk"   -> _sanitize_keywords_nltk()  (PorterStemmer grounding)
     """
+    if _KEYWORD_PRUNING_MODE == "none":
+        return sanitize_keywords_none(content, keywords, max_keywords)
     if _KEYWORD_PRUNING_MODE == "simple":
         return sanitize_keywords_simple(content, keywords, max_keywords)
     return _sanitize_keywords_nltk(content, keywords, max_keywords)
