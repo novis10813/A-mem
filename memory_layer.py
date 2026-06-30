@@ -1,6 +1,7 @@
 from ast import Str
 from typing import List, Dict, Optional, Literal, Any, Union
 import json
+import re
 from datetime import datetime
 import uuid
 from rank_bm25 import BM25Okapi
@@ -17,6 +18,7 @@ from litellm import completion
 import requests
 import json as json_lib
 import time
+from llm_text_parsers import sanitize_keywords, _heuristic_keywords
 
 def simple_tokenize(text):
     return word_tokenize(text)
@@ -379,8 +381,11 @@ class MemoryNote:
             try:        
                 response = re.sub(r'^```json\s*|\s*```$', '', response, flags=re.MULTILINE).strip()
                 analysis = json.loads(response)
-            except:
-                print(f"JSON parsing error in analyze_content: {e}")
+                analysis["keywords"] = sanitize_keywords(content, analysis.get("keywords", []))
+                if not analysis["keywords"]:
+                    analysis["keywords"] = sanitize_keywords(content, _heuristic_keywords(content))
+            except Exception as parse_error:
+                print(f"JSON parsing error in analyze_content: {parse_error}")
                 print(f"Raw response: {response}")
                 analysis = {
                     "keywords": [],

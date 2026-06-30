@@ -8,8 +8,10 @@ import json
 import re
 import logging
 from typing import Dict, List, Any, Optional, Callable
+from nltk.stem import PorterStemmer
 
 logger = logging.getLogger("amem_robust")
+_STEMMER = PorterStemmer()
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -42,6 +44,53 @@ def parse_with_json_fallback(response: str, plain_text_parser: Callable, *parser
 # ---------------------------------------------------------------------------
 # List parsing helpers
 # ---------------------------------------------------------------------------
+
+KEYWORD_STOPWORDS = {
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
+    'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+    'as', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'between', 'out', 'off', 'over', 'under', 'again',
+    'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why',
+    'how', 'all', 'both', 'each', 'few', 'more', 'most', 'other',
+    'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
+    'than', 'too', 'very', 'just', 'because', 'but', 'and', 'or',
+    'if', 'while', 'about', 'up', 'it', 'its', 'i', 'me', 'my',
+    'you', 'your', 'he', 'she', 'they', 'we', 'this', 'that', 'these',
+    'those', 'what', 'which', 'who', 'whom', 'says', 'said', 'speaker',
+}
+
+KEYWORD_GENERIC_TERMS = {
+    'activity', 'anything', 'chat', 'conversation', 'event', 'events',
+    'experience', 'experiences', 'farewell', 'goodbye', 'happened', 'life',
+    'meeting', 'people', 'person', 'session', 'situation', 'something',
+    'stuff', 'talk', 'thing', 'things', 'time', 'topic', 'topics', 'work',
+}
+
+KEYWORD_CONVERSATION_FILLERS = {
+    'awesome', 'cool', 'definitely', 'glad', 'great', 'hey', 'image', 'let',
+    'like', 'looks', 'ok', 'okay', 'photo', 'really', 'sounds', 'thank',
+    'thanks', 'wow', 'yeah', 'yep',
+}
+
+KEYWORD_TIME_TERMS = {
+    'today', 'tomorrow', 'yesterday', 'tonight', 'morning', 'afternoon',
+    'evening', 'night', 'week', 'weekend', 'month', 'year', 'daily',
+}
+
+KEYWORD_FILTER_TERMS = (
+    KEYWORD_STOPWORDS
+    | KEYWORD_GENERIC_TERMS
+    | KEYWORD_TIME_TERMS
+    | KEYWORD_CONVERSATION_FILLERS
+)
+
+KEYWORD_HARD_FILTER_TERMS = (
+    KEYWORD_GENERIC_TERMS
+    | KEYWORD_TIME_TERMS
+    | KEYWORD_CONVERSATION_FILLERS
+)
 
 def _parse_list_items(text: str) -> List[str]:
     """Parse a section of text into a list of items.
@@ -78,6 +127,102 @@ def _parse_list_items(text: str) -> List[str]:
             items.append(line)
 
     return items
+
+
+def _keyword_tokens(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _normalize_keyword(keyword: Any) -> str:
+    text = str(keyword).lower()
+    text = re.sub(r"[_/-]+", " ", text)
+    text = re.sub(r"[^a-z0-9\s-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    return text
+
+
+def _light_stem(token: str) -> str:
+    return _STEMMER.stem(token)
+
+
+def _build_content_token_index(content: str) -> set[str]:
+    tokens = set(_keyword_tokens(content))
+    return tokens | {_light_stem(token) for token in tokens}
+
+
+def _token_is_grounded(token: str, content_tokens: set[str]) -> bool:
+    return token in content_tokens or _light_stem(token) in content_tokens
+
+
+def _is_artifact_token(token: str) -> bool:
+    return token.endswith("says")
+
+
+def sanitize_keywords(
+    content: str,
+    keywords: Any,
+    max_keywords: int = 5,
+) -> List[str]:
+    """Prune noisy LLM keywords using KEA-style rule features.
+
+    The rules are intentionally lightweight: normalize, remove generic terms,
+    require grounding in the source content, prefer specific phrases,
+    then keep the highest-scoring candidates.
+    """
+    if isinstance(keywords, str):
+        candidates = _parse_list_items(keywords)
+    elif isinstance(keywords, list):
+        candidates = keywords
+    else:
+        return []
+
+    content_tokens = _build_content_token_index(content or "")
+    content_lower = (content or "").lower()
+    seen = set()
+    filtered = []
+
+    for raw_keyword in candidates:
+        keyword = _normalize_keyword(raw_keyword)
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+
+        tokens = _keyword_tokens(keyword)
+        if any(_is_artifact_token(t) for t in tokens):
+            continue
+        if any(t in KEYWORD_HARD_FILTER_TERMS for t in tokens):
+            continue
+        meaningful_tokens = [t for t in tokens if t not in KEYWORD_FILTER_TERMS]
+        if not meaningful_tokens:
+            continue
+        if len(meaningful_tokens) == 1 and meaningful_tokens[0] in KEYWORD_GENERIC_TERMS:
+            continue
+        if content_tokens and not all(_token_is_grounded(t, content_tokens) for t in meaningful_tokens):
+            continue
+
+        filtered.append((keyword, meaningful_tokens))
+
+    kept = []
+    for keyword, tokens in sorted(filtered, key=lambda item: (-len(item[1]), item[0])):
+        token_set = set(tokens)
+        if any(token_set < set(existing_tokens) for _, existing_tokens in kept):
+            continue
+        kept.append((keyword, tokens))
+
+    def score(item):
+        keyword, tokens = item
+        frequency = sum(content_lower.count(token) for token in tokens)
+        first_positions = [
+            content_lower.find(token)
+            for token in tokens
+            if content_lower.find(token) >= 0
+        ]
+        first_pos = min(first_positions) if first_positions else len(content_lower) + 1
+        phrase_bonus = min(len(tokens), 3)
+        return (-frequency, -phrase_bonus, first_pos, keyword)
+
+    ranked = sorted(kept, key=score)
+    return [keyword for keyword, _ in ranked[:max_keywords]]
 
 
 def _extract_section(text: str, marker: str, next_markers: Optional[List[str]] = None) -> str:
@@ -453,6 +598,10 @@ def validate_analysis_result(result: Dict[str, Any], content: str = "") -> Dict[
     if not keywords and content:
         keywords = _heuristic_keywords(content)
 
+    keywords = sanitize_keywords(content, keywords)
+    if not keywords and content:
+        keywords = sanitize_keywords(content, _heuristic_keywords(content))
+
     # Repair empty context from content
     if not context and content:
         context = _heuristic_context(content)
@@ -469,29 +618,13 @@ def validate_analysis_result(result: Dict[str, Any], content: str = "") -> Dict[
 
 def _heuristic_keywords(content: str, max_keywords: int = 5) -> List[str]:
     """Extract heuristic keywords from content text."""
-    # Remove common stop words and extract significant words
-    stop_words = {
-        'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-        'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
-        'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
-        'as', 'into', 'through', 'during', 'before', 'after', 'above',
-        'below', 'between', 'out', 'off', 'over', 'under', 'again',
-        'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why',
-        'how', 'all', 'both', 'each', 'few', 'more', 'most', 'other',
-        'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
-        'than', 'too', 'very', 'just', 'because', 'but', 'and', 'or',
-        'if', 'while', 'about', 'up', 'it', 'its', 'i', 'me', 'my',
-        'you', 'your', 'he', 'she', 'they', 'we', 'this', 'that', 'these',
-        'those', 'what', 'which', 'who', 'whom', 'says', 'said', 'speaker',
-    }
     words = re.findall(r'\b[a-zA-Z]{3,}\b', content)
     # Prefer capitalized words (likely proper nouns / key terms)
     scored = []
     seen = set()
     for w in words:
         w_lower = w.lower()
-        if w_lower in stop_words or w_lower in seen:
+        if w_lower in KEYWORD_FILTER_TERMS or _is_artifact_token(w_lower) or w_lower in seen:
             continue
         seen.add(w_lower)
         score = 2 if w[0].isupper() else 1
