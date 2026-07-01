@@ -15,6 +15,11 @@ from llm_text_parsers import (
     parse_keywords_response,
     set_keyword_pruning_mode,
 )
+from memory_pipeline import (
+    MemoryProcessingPipeline,
+    PipelineTimingHook,
+    merge_timing_summaries,
+)
 import os
 import json
 import argparse
@@ -46,13 +51,15 @@ class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000):
+                 sglang_host="http://localhost", sglang_port=30000,
+                 memory_pipeline=None):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
             llm_model=model,
             sglang_host=sglang_host,
             sglang_port=sglang_port,
+            pipeline=memory_pipeline,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -170,6 +177,7 @@ def merge_sample_outputs(sample_outputs):
     all_categories = []
     category_counts = Counter()
     error_num = 0
+    sample_timing = []
 
     for sample_output in sorted(sample_outputs, key=lambda item: item["sample_idx"]):
         results.extend(sample_output["results"])
@@ -177,6 +185,10 @@ def merge_sample_outputs(sample_outputs):
         all_categories.extend(sample_output["categories"])
         category_counts.update(sample_output["category_counts"])
         error_num += sample_output.get("error_num", 0)
+        sample_timing.append({
+            "sample_idx": sample_output["sample_idx"],
+            "stage_timing": sample_output.get("stage_timing", {}),
+        })
 
     return {
         "results": results,
@@ -185,6 +197,10 @@ def merge_sample_outputs(sample_outputs):
         "category_counts": category_counts,
         "total_questions": len(all_metrics),
         "error_num": error_num,
+        "stage_timing": merge_timing_summaries(
+            sample["stage_timing"] for sample in sample_timing
+        ),
+        "sample_timing": sample_timing,
     }
 
 
@@ -195,8 +211,10 @@ def evaluate_sample(sample_idx: int, sample, model: str, backend: str,
                     eval_logger: logging.Logger,
                     show_progress: bool = True):
     """Evaluate one LoCoMo sample with an isolated agent and cache files."""
+    timing_hook = PipelineTimingHook()
+    memory_pipeline = MemoryProcessingPipeline(hooks=[timing_hook])
     agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                   sglang_host, sglang_port)
+                                   sglang_host, sglang_port, memory_pipeline)
 
     memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
     retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -299,6 +317,7 @@ def evaluate_sample(sample_idx: int, sample, model: str, backend: str,
         "categories": all_categories,
         "category_counts": dict(category_counts),
         "error_num": 0,
+        "stage_timing": timing_hook.summary(),
     }
 
 
@@ -384,6 +403,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     category_counts = merged["category_counts"]
     total_questions = merged["total_questions"]
     error_num = merged["error_num"]
+    stage_timing = merged["stage_timing"]
+    sample_timing = merged["sample_timing"]
 
     aggregate_results = aggregate_metrics(all_metrics, all_categories)
 
@@ -398,6 +419,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             str(cat): count for cat, count in category_counts.items()
         },
         "aggregate_metrics": aggregate_results,
+        "stage_timing": stage_timing,
+        "sample_timing": sample_timing,
         "individual_results": results,
     }
     eval_logger.info(f"Error number: {error_num}")
@@ -420,6 +443,30 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             eval_logger.info(f"  {metric_name}:")
             for stat_name, value in stats.items():
                 eval_logger.info(f"    {stat_name}: {value:.4f}")
+
+    eval_logger.info("Aggregate Stage Timing:")
+    for stage_name, stats in stage_timing.items():
+        eval_logger.info(
+            "  %s: count=%d total=%.4fs avg=%.4fs min=%.4fs max=%.4fs",
+            stage_name,
+            stats["count"],
+            stats["total_seconds"],
+            stats["avg_seconds"],
+            stats["min_seconds"],
+            stats["max_seconds"],
+        )
+
+    eval_logger.info("Per-Sample Stage Timing:")
+    for sample in sample_timing:
+        eval_logger.info("  Sample %s:", sample["sample_idx"])
+        for stage_name, stats in sample["stage_timing"].items():
+            eval_logger.info(
+                "    %s: count=%d total=%.4fs avg=%.4fs",
+                stage_name,
+                stats["count"],
+                stats["total_seconds"],
+                stats["avg_seconds"],
+            )
 
     return final_results
 

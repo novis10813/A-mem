@@ -1,6 +1,7 @@
 """Composable memory-processing pipeline for A-MEM experiments."""
 
 from dataclasses import dataclass, field
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -29,6 +30,86 @@ class PipelineHook:
 
     def after_stage(self, stage_name: str, context: MemoryPipelineContext) -> None:
         pass
+
+
+class PipelineTimingHook(PipelineHook):
+    """Collect wall-clock timing summaries for pipeline stages."""
+
+    def __init__(self):
+        self._active_starts: Dict[str, List[float]] = {}
+        self._stats: Dict[str, Dict[str, float]] = {}
+
+    def before_stage(self, stage_name: str, context: MemoryPipelineContext) -> None:
+        self._active_starts.setdefault(stage_name, []).append(time.perf_counter())
+
+    def after_stage(self, stage_name: str, context: MemoryPipelineContext) -> None:
+        starts = self._active_starts.get(stage_name)
+        if not starts:
+            return
+        elapsed = time.perf_counter() - starts.pop()
+        update_timing_stats(self._stats, stage_name, elapsed)
+
+    def summary(self) -> Dict[str, Dict[str, float]]:
+        return finalize_timing_stats(self._stats)
+
+
+def update_timing_stats(stats: Dict[str, Dict[str, float]], stage_name: str, elapsed: float) -> None:
+    stage_stats = stats.setdefault(
+        stage_name,
+        {
+            "count": 0,
+            "total_seconds": 0.0,
+            "min_seconds": elapsed,
+            "max_seconds": elapsed,
+        },
+    )
+    stage_stats["count"] += 1
+    stage_stats["total_seconds"] += elapsed
+    stage_stats["min_seconds"] = min(stage_stats["min_seconds"], elapsed)
+    stage_stats["max_seconds"] = max(stage_stats["max_seconds"], elapsed)
+
+
+def finalize_timing_stats(stats: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    summary = {}
+    for stage_name, stage_stats in sorted(stats.items()):
+        count = int(stage_stats["count"])
+        total_seconds = float(stage_stats["total_seconds"])
+        summary[stage_name] = {
+            "count": count,
+            "total_seconds": total_seconds,
+            "min_seconds": float(stage_stats["min_seconds"]),
+            "max_seconds": float(stage_stats["max_seconds"]),
+            "avg_seconds": total_seconds / count if count else 0.0,
+        }
+    return summary
+
+
+def merge_timing_summaries(
+    timing_summaries: Sequence[Dict[str, Dict[str, float]]],
+) -> Dict[str, Dict[str, float]]:
+    merged: Dict[str, Dict[str, float]] = {}
+    for timing_summary in timing_summaries:
+        for stage_name, stage_stats in timing_summary.items():
+            count = int(stage_stats.get("count", 0))
+            if count <= 0:
+                continue
+            total_seconds = float(stage_stats.get("total_seconds", 0.0))
+            min_seconds = float(stage_stats.get("min_seconds", 0.0))
+            max_seconds = float(stage_stats.get("max_seconds", 0.0))
+            current = merged.setdefault(
+                stage_name,
+                {
+                    "count": 0,
+                    "total_seconds": 0.0,
+                    "min_seconds": min_seconds,
+                    "max_seconds": max_seconds,
+                },
+            )
+            current["count"] += count
+            current["total_seconds"] += total_seconds
+            current["min_seconds"] = min(current["min_seconds"], min_seconds)
+            current["max_seconds"] = max(current["max_seconds"], max_seconds)
+    return finalize_timing_stats(merged)
 
 
 class MemoryPipelineStageError(Exception):

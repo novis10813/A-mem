@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 from memory_layer_robust import RobustAgenticMemorySystem
-from memory_pipeline import MemoryProcessingPipeline, PipelineHook
+from memory_pipeline import (
+    MemoryProcessingPipeline,
+    PipelineHook,
+    PipelineTimingHook,
+    merge_timing_summaries,
+)
 
 
 class RecordingHook(PipelineHook):
@@ -158,3 +163,68 @@ def test_add_note_stores_constructed_note_when_link_stage_fails():
     assert system.memories == {"note-link-failed": note}
     assert system.retriever.documents == ["constructed context keywords: constructed"]
     assert system.evo_cnt == 0
+
+
+def test_pipeline_timing_hook_records_stage_summary():
+    timing_hook = PipelineTimingHook()
+    pipeline = MemoryProcessingPipeline(hooks=[timing_hook])
+    system = FakeSystem()
+
+    pipeline.process(system, "hello")
+
+    summary = timing_hook.summary()
+    assert set(summary) == {"memory_construction", "link_generation", "memory_evolution"}
+    for stats in summary.values():
+        assert stats["count"] == 1
+        assert stats["total_seconds"] >= 0.0
+        assert stats["min_seconds"] >= 0.0
+        assert stats["max_seconds"] >= stats["min_seconds"]
+        assert stats["avg_seconds"] == stats["total_seconds"] / stats["count"]
+
+
+def test_merge_timing_summaries_aggregates_stage_counts_and_durations():
+    merged = merge_timing_summaries([
+        {
+            "memory_construction": {
+                "count": 2,
+                "total_seconds": 5.0,
+                "min_seconds": 2.0,
+                "max_seconds": 3.0,
+                "avg_seconds": 2.5,
+            }
+        },
+        {},
+        {
+            "memory_construction": {
+                "count": 1,
+                "total_seconds": 4.0,
+                "min_seconds": 4.0,
+                "max_seconds": 4.0,
+                "avg_seconds": 4.0,
+            },
+            "link_generation": {
+                "count": 1,
+                "total_seconds": 1.5,
+                "min_seconds": 1.5,
+                "max_seconds": 1.5,
+                "avg_seconds": 1.5,
+            },
+        },
+    ])
+
+    assert merged == {
+        "link_generation": {
+            "count": 1,
+            "total_seconds": 1.5,
+            "min_seconds": 1.5,
+            "max_seconds": 1.5,
+            "avg_seconds": 1.5,
+        },
+        "memory_construction": {
+            "count": 3,
+            "total_seconds": 9.0,
+            "min_seconds": 2.0,
+            "max_seconds": 4.0,
+            "avg_seconds": 3.0,
+        },
+    }
