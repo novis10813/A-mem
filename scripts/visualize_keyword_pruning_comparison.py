@@ -272,6 +272,35 @@ def per_sample_stats(rows: list[dict], variants: list[str]) -> list[dict]:
     return output
 
 
+def compact_text(value: str, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def empty_note_examples(rows: list[dict], variants: list[str], limit: int = 30) -> list[dict]:
+    examples = []
+    for variant in variants:
+        count = 0
+        for row in rows:
+            if row[variant]:
+                continue
+            examples.append({
+                "variant": variant,
+                "sample_idx": row["sample_idx"],
+                "note_id": row["note_id"],
+                "original_keywords": "; ".join(row["original"]),
+                "rule_pruning_keywords": "; ".join(row["rule_pruning"]),
+                "nltk_stem_keywords": "; ".join(row["nltk_stem"]),
+                "content_snippet": compact_text(row["content"]),
+            })
+            count += 1
+            if count >= limit:
+                break
+    return examples
+
+
 def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -316,6 +345,7 @@ def render_html(
     stats: list[dict],
     comparisons: list[dict],
     sample_rows: list[dict],
+    empty_examples: list[dict],
 ) -> str:
     stat_by_variant = {item["variant"]: item for item in stats}
     max_total = max(item["total_keywords"] for item in stats)
@@ -357,6 +387,16 @@ def render_html(
             row["original_empty"],
             row["rule_pruning_empty"],
             row["nltk_stem_empty"],
+        ])
+
+    empty_example_rows = []
+    for row in empty_examples:
+        empty_example_rows.append([
+            row["variant"],
+            row["sample_idx"],
+            row["note_id"],
+            row["original_keywords"],
+            row["content_snippet"],
         ])
 
     original = stat_by_variant["original"]
@@ -463,12 +503,25 @@ def render_html(
       <h2>Per-Sample Breakdown</h2>
       {table(["Sample","Notes","Original unique","Rule unique","Stem unique","Original empty","Rule empty","Stem empty"], sample_table_rows)}
     </section>
+    <section>
+      <h2>Empty Note Examples</h2>
+      {table(["Variant","Sample","Note ID","Original keywords","Content snippet"], empty_example_rows)}
+    </section>
   </main>
 </body>
 </html>"""
 
 
-def write_outputs(output_dir: Path, output_html: Path, rows: list[dict], stats: list[dict], comparisons: list[dict], sample_rows: list[dict], cache_dir: Path) -> None:
+def write_outputs(
+    output_dir: Path,
+    output_html: Path,
+    rows: list[dict],
+    stats: list[dict],
+    comparisons: list[dict],
+    sample_rows: list[dict],
+    empty_examples: list[dict],
+    cache_dir: Path,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_html.parent.mkdir(parents=True, exist_ok=True)
 
@@ -495,6 +548,7 @@ def write_outputs(output_dir: Path, output_html: Path, rows: list[dict], stats: 
             for comp in comparisons
         ],
         "per_sample": sample_rows,
+        "empty_note_examples": empty_examples,
     }
     with (output_dir / "keyword_pruning_comparison_summary.json").open("w") as f:
         json.dump(summary, f, indent=2)
@@ -522,6 +576,19 @@ def write_outputs(output_dir: Path, output_html: Path, rows: list[dict], stats: 
             [{"keyword": kw, "count": count} for kw, count in item["top_keywords"]],
             ["keyword", "count"],
         )
+    write_csv(
+        output_dir / "empty_note_examples.csv",
+        empty_examples,
+        [
+            "variant",
+            "sample_idx",
+            "note_id",
+            "original_keywords",
+            "rule_pruning_keywords",
+            "nltk_stem_keywords",
+            "content_snippet",
+        ],
+    )
     for comp in comparisons:
         slug = f'{comp["before"]}_to_{comp["after"]}'
         write_csv(
@@ -540,7 +607,10 @@ def write_outputs(output_dir: Path, output_html: Path, rows: list[dict], stats: 
             ["keyword", "count"],
         )
 
-    output_html.write_text(render_html(cache_dir, stats, comparisons, sample_rows), encoding="utf-8")
+    output_html.write_text(
+        render_html(cache_dir, stats, comparisons, sample_rows, empty_examples),
+        encoding="utf-8",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -562,7 +632,8 @@ def main() -> None:
         compare_variants(rows, "original", "nltk_stem", _light_stem),
     ]
     samples = per_sample_stats(rows, variants)
-    write_outputs(args.output_dir, args.output_html, rows, stats, comparisons, samples, args.cache_dir)
+    empty_examples = empty_note_examples(rows, ["rule_pruning", "nltk_stem"])
+    write_outputs(args.output_dir, args.output_html, rows, stats, comparisons, samples, empty_examples, args.cache_dir)
     print(f"Wrote {args.output_html}")
     print(f"Wrote detail CSV/JSON files under {args.output_dir}")
 
