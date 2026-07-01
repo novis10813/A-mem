@@ -22,6 +22,11 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 from memory_layer import SimpleEmbeddingRetriever, simple_tokenize
+from memory_pipeline import (
+    MemoryPipelineContext,
+    MemoryPipelineStageError,
+    MemoryProcessingPipeline,
+)
 from llm_text_parsers import (
     ANALYZE_CONTENT_PROMPT,
     EVOLUTION_DECISION_PROMPT,
@@ -361,7 +366,8 @@ class RobustAgenticMemorySystem:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 pipeline: Optional[MemoryProcessingPipeline] = None):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
         self.retriever = SimpleEmbeddingRetriever(model_name)
@@ -371,18 +377,31 @@ class RobustAgenticMemorySystem:
         )
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold
+        self.pipeline = pipeline or MemoryProcessingPipeline()
 
     # ---- public API (mirrors AgenticMemorySystem) ----
 
     def add_note(self, content: str, time: str = None, **kwargs) -> str:
         """Add a new memory note."""
-        note = RobustMemoryNote(
-            content=content,
-            llm_controller=self.llm_controller,
-            timestamp=time,
-            **kwargs,
-        )
-        evo_label, note = self.process_memory(note)
+        try:
+            evo_label, note = self.pipeline.process(self, content, time=time, **kwargs)
+        except MemoryPipelineStageError as e:
+            if e.context.note is not None and e.stage_name != "memory_construction":
+                note = e.context.note
+                logger.error(
+                    "Memory pipeline stage %s failed for note %s: %s; storing without evolution",
+                    e.stage_name, note.id, e.original,
+                )
+                evo_label = False
+            else:
+                logger.error("Memory construction pipeline failed for content %r: %s", content[:80], e)
+                note = self.construct_memory_note(content, time=time, **kwargs)
+                evo_label = False
+        except Exception as e:
+            logger.error("Memory pipeline failed for content %r: %s", content[:80], e)
+            note = self.construct_memory_note(content, time=time, **kwargs)
+            evo_label = False
+
         self.memories[note.id] = note
         self.retriever.add_documents([
             note.context +
@@ -393,6 +412,15 @@ class RobustAgenticMemorySystem:
             if self.evo_cnt % self.evo_threshold == 0:
                 self.consolidate_memories()
         return note.id
+
+    def construct_memory_note(self, content: str, time: str = None, **kwargs) -> RobustMemoryNote:
+        """Default memory construction stage."""
+        return RobustMemoryNote(
+            content=content,
+            llm_controller=self.llm_controller,
+            timestamp=time,
+            **kwargs,
+        )
 
     def consolidate_memories(self):
         """Re-initialize the retriever with current memory state."""
@@ -457,83 +485,93 @@ class RobustAgenticMemorySystem:
                 j += 1
         return memory_str
 
-    # ---- evolution (3 sequential plain-text calls) ----
+    # ---- default pipeline stages (3 sequential plain-text calls) ----
 
     def process_memory(self, note: RobustMemoryNote) -> tuple:
-        """Process a memory note for evolution using plain-text LLM calls.
-
-        Uses up to 3 sequential calls (conditional):
-          1. Evolution decision
-          2. Strengthen details (skip if no strengthen)
-          3. Update neighbors (skip if no update)
-        """
-        neighbor_memory, indices = self.find_related_memories(note.content, k=5)
-
-        if len(indices) == 0:
-            return False, note
-
+        """Process an already constructed memory note through link/evolution stages."""
         try:
-            # ---- Call 1: Evolution decision ----
-            decision_prompt = EVOLUTION_DECISION_PROMPT.format(
-                context=note.context,
-                content=note.content,
-                keywords=note.keywords,
-                nearest_neighbors_memories=neighbor_memory,
-            )
-            decision_response = self.llm_controller.llm.get_completion(decision_prompt)
-            decision = parse_evolution_decision(decision_response)
-            logger.debug("Evolution decision: %s", decision)
-
-            if decision["decision"] == "NO_EVOLUTION":
-                return False, note
-
-            should_strengthen = decision["decision"] in ("STRENGTHEN", "STRENGTHEN_AND_UPDATE")
-            should_update = decision["decision"] in ("UPDATE_NEIGHBOR", "STRENGTHEN_AND_UPDATE")
-
-            # ---- Call 2: Strengthen details (conditional) ----
-            if should_strengthen:
-                strengthen_prompt = STRENGTHEN_DETAILS_PROMPT.format(
-                    content=note.content,
-                    keywords=note.keywords,
-                    nearest_neighbors_memories=neighbor_memory,
-                )
-                strengthen_response = self.llm_controller.llm.get_completion(strengthen_prompt)
-                strengthen = parse_strengthen_details(strengthen_response)
-                logger.debug("Strengthen details: %s", strengthen)
-
-                note.links.extend(strengthen["connections"])
-                if strengthen["tags"]:
-                    note.tags = strengthen["tags"]
-
-            # ---- Call 3: Update neighbors (conditional) ----
-            if should_update:
-                update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
-                    content=note.content,
-                    context=note.context,
-                    nearest_neighbors_memories=neighbor_memory,
-                    max_neighbor_idx=len(indices) - 1,
-                    neighbor_count=len(indices),
-                )
-                update_response = self.llm_controller.llm.get_completion(update_prompt)
-                neighbor_updates = parse_update_neighbors(update_response, len(indices))
-                logger.debug("Neighbor updates: %s", neighbor_updates)
-
-                noteslist = list(self.memories.values())
-                notes_id = list(self.memories.keys())
-                for i in range(min(len(indices), len(neighbor_updates))):
-                    upd = neighbor_updates[i]
-                    memorytmp_idx = indices[i]
-                    if memorytmp_idx >= len(noteslist):
-                        continue
-                    notetmp = noteslist[memorytmp_idx]
-                    if upd["tags"]:
-                        notetmp.tags = upd["tags"]
-                    if upd["context"]:
-                        notetmp.context = upd["context"]
-                    self.memories[notes_id[memorytmp_idx]] = notetmp
-
-            return True, note
-
+            return self.pipeline.process_existing_note(self, note)
         except Exception as e:
             logger.error("Evolution failed for note %s: %s — storing without evolution", note.id, e)
             return False, note
+
+    def generate_memory_links(self, context: MemoryPipelineContext) -> None:
+        """Default link generation stage."""
+        note = context.note
+        neighbor_memory, indices = self.find_related_memories(note.content, k=5)
+        context.neighbor_memory = neighbor_memory
+        context.neighbor_indices = list(indices)
+
+        if len(indices) == 0:
+            return
+
+        decision_prompt = EVOLUTION_DECISION_PROMPT.format(
+            context=note.context,
+            content=note.content,
+            keywords=note.keywords,
+            nearest_neighbors_memories=neighbor_memory,
+        )
+        decision_response = self.llm_controller.llm.get_completion(decision_prompt)
+        decision = parse_evolution_decision(decision_response)
+        logger.debug("Evolution decision: %s", decision)
+
+        context.decision = decision
+        if decision["decision"] == "NO_EVOLUTION":
+            return
+
+        context.evolution_label = True
+        context.should_strengthen = decision["decision"] in (
+            "STRENGTHEN",
+            "STRENGTHEN_AND_UPDATE",
+        )
+        context.should_update = decision["decision"] in (
+            "UPDATE_NEIGHBOR",
+            "STRENGTHEN_AND_UPDATE",
+        )
+
+        if not context.should_strengthen:
+            return
+
+        strengthen_prompt = STRENGTHEN_DETAILS_PROMPT.format(
+            content=note.content,
+            keywords=note.keywords,
+            nearest_neighbors_memories=neighbor_memory,
+        )
+        strengthen_response = self.llm_controller.llm.get_completion(strengthen_prompt)
+        strengthen = parse_strengthen_details(strengthen_response)
+        logger.debug("Strengthen details: %s", strengthen)
+
+        note.links.extend(strengthen["connections"])
+        if strengthen["tags"]:
+            note.tags = strengthen["tags"]
+
+    def evolve_related_memories(self, context: MemoryPipelineContext) -> None:
+        """Default memory evolution stage."""
+        if not context.should_update:
+            return
+
+        note = context.note
+        update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
+            content=note.content,
+            context=note.context,
+            nearest_neighbors_memories=context.neighbor_memory,
+            max_neighbor_idx=len(context.neighbor_indices) - 1,
+            neighbor_count=len(context.neighbor_indices),
+        )
+        update_response = self.llm_controller.llm.get_completion(update_prompt)
+        neighbor_updates = parse_update_neighbors(update_response, len(context.neighbor_indices))
+        logger.debug("Neighbor updates: %s", neighbor_updates)
+
+        noteslist = list(self.memories.values())
+        notes_id = list(self.memories.keys())
+        for i in range(min(len(context.neighbor_indices), len(neighbor_updates))):
+            upd = neighbor_updates[i]
+            memorytmp_idx = context.neighbor_indices[i]
+            if memorytmp_idx >= len(noteslist):
+                continue
+            notetmp = noteslist[memorytmp_idx]
+            if upd["tags"]:
+                notetmp.tags = upd["tags"]
+            if upd["context"]:
+                notetmp.context = upd["context"]
+            self.memories[notes_id[memorytmp_idx]] = notetmp

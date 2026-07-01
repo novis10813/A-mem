@@ -19,15 +19,12 @@ import os
 import json
 import argparse
 import logging
-from typing import List, Dict, Optional
-from pathlib import Path
-import numpy as np
-from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
+from load_dataset import load_locomo_dataset
 import nltk
-from sentence_transformers import SentenceTransformer
-from sentence_transformers.util import pytorch_cos_sim
-import statistics
 from collections import defaultdict
+from collections import Counter
 import pickle
 import random
 from tqdm import tqdm
@@ -41,13 +38,6 @@ try:
 except LookupError:
     nltk.download('punkt')
     nltk.download('wordnet')
-
-# Initialize SentenceTransformer model (this will be reused)
-try:
-    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-except Exception as e:
-    print(f"Warning: Could not load SentenceTransformer model: {e}")
-    sentence_model = None
 
 logger = logging.getLogger("amem_robust")
 
@@ -173,12 +163,154 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     return eval_logger
 
 
+def merge_sample_outputs(sample_outputs):
+    """Merge per-sample worker outputs in deterministic sample order."""
+    results = []
+    all_metrics = []
+    all_categories = []
+    category_counts = Counter()
+    error_num = 0
+
+    for sample_output in sorted(sample_outputs, key=lambda item: item["sample_idx"]):
+        results.extend(sample_output["results"])
+        all_metrics.extend(sample_output["metrics"])
+        all_categories.extend(sample_output["categories"])
+        category_counts.update(sample_output["category_counts"])
+        error_num += sample_output.get("error_num", 0)
+
+    return {
+        "results": results,
+        "metrics": all_metrics,
+        "categories": all_categories,
+        "category_counts": category_counts,
+        "total_questions": len(all_metrics),
+        "error_num": error_num,
+    }
+
+
+def evaluate_sample(sample_idx: int, sample, model: str, backend: str,
+                    retrieve_k: int, temperature_c5: float,
+                    sglang_host: str, sglang_port: int,
+                    memories_dir: str, allow_categories,
+                    eval_logger: logging.Logger,
+                    show_progress: bool = True):
+    """Evaluate one LoCoMo sample with an isolated agent and cache files."""
+    agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
+                                   sglang_host, sglang_port)
+
+    memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
+    retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
+    retriever_cache_embeddings_file = os.path.join(
+        memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
+    )
+
+    if os.path.exists(memory_cache_file):
+        eval_logger.info(f"Loading cached memories for sample {sample_idx}")
+        with open(memory_cache_file, 'rb') as f:
+            cached_memories = pickle.load(f)
+        agent.memory_system.memories = cached_memories
+        if os.path.exists(retriever_cache_file):
+            eval_logger.info(f"Found retriever cache files for sample {sample_idx}")
+            agent.memory_system.retriever = agent.memory_system.retriever.load(
+                retriever_cache_file, retriever_cache_embeddings_file
+            )
+        else:
+            eval_logger.info(f"No retriever cache found for sample {sample_idx}, loading from memory")
+            agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
+                cached_memories, 'all-MiniLM-L6-v2'
+            )
+        eval_logger.info(f"Successfully loaded {len(cached_memories)} memories for sample {sample_idx}")
+    else:
+        eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
+
+        all_turns = [
+            (turns.date_time, turn)
+            for _, turns in sample.conversation.sessions.items()
+            for turn in turns.turns
+        ]
+        with tqdm(all_turns, desc=f"[Sample {sample_idx}] Building memories",
+                  unit="turn", dynamic_ncols=True, disable=not show_progress) as pbar:
+            for turn_datatime, turn in pbar:
+                conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
+                agent.add_memory(conversation_tmp, time=turn_datatime)
+                mem_count = len(agent.memory_system.memories)
+                pbar.set_postfix(memories=mem_count)
+
+        memories_to_cache = agent.memory_system.memories
+        with open(memory_cache_file, 'wb') as f:
+            pickle.dump(memories_to_cache, f)
+        agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
+        eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories for sample {sample_idx}")
+
+    eval_logger.info(f"Processing sample {sample_idx}")
+
+    results = []
+    all_metrics = []
+    all_categories = []
+    category_counts = defaultdict(int)
+    total_questions = 0
+
+    eligible_qas = [qa for qa in sample.qa if int(qa.category) in allow_categories]
+    with tqdm(eligible_qas, desc=f"[Sample {sample_idx}] Answering QAs",
+              unit="qa", dynamic_ncols=True, disable=not show_progress) as pbar:
+        for qa in pbar:
+            total_questions += 1
+            category_counts[qa.category] += 1
+            pbar.set_postfix(cat=qa.category, total=total_questions)
+
+            prediction, user_prompt, raw_context = agent.answer_question(
+                qa.question, qa.category, qa.final_answer
+            )
+
+            prediction = parse_plain_text_answer(prediction)
+
+            eval_logger.info(f"Sample {sample_idx} question {total_questions}: {qa.question}")
+            eval_logger.info(f"Prediction: {prediction}")
+            eval_logger.info(f"Reference: {qa.final_answer}")
+            eval_logger.info(f"User Prompt: {user_prompt}")
+            eval_logger.info(f"Category: {qa.category}")
+            eval_logger.info(f"Raw Context: {raw_context}")
+
+            metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
+                "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0,
+                "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0,
+                "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
+            }
+
+            all_metrics.append(metrics)
+            all_categories.append(qa.category)
+
+            results.append({
+                "sample_id": sample_idx,
+                "question": qa.question,
+                "prediction": prediction,
+                "reference": qa.final_answer,
+                "category": qa.category,
+                "metrics": metrics,
+            })
+
+            if total_questions % 10 == 0:
+                eval_logger.info(f"Processed {total_questions} questions for sample {sample_idx}")
+
+    return {
+        "sample_idx": sample_idx,
+        "results": results,
+        "metrics": all_metrics,
+        "categories": all_categories,
+        "category_counts": dict(category_counts),
+        "error_num": 0,
+    }
+
+
 def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None,
                      ratio: float = 1.0, backend: str = "sglang",
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
-                     keyword_pruning_mode: str = "nltk"):
+                     keyword_pruning_mode: str = "nltk", max_workers: int = 10):
     """Evaluate the robust agent on the LoComo dataset."""
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+
     # Configure keyword pruning mode before any memory operations
     set_keyword_pruning_mode(keyword_pruning_mode)
 
@@ -200,14 +332,6 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         samples = samples[:num_samples]
         eval_logger.info(f"Using {num_samples} samples ({ratio*100:.1f}% of dataset)")
 
-    results = []
-    all_metrics = []
-    all_categories = []
-    total_questions = 0
-    category_counts = defaultdict(int)
-
-    i = 0
-    error_num = 0
     memories_dir = os.path.join(
         os.path.dirname(__file__),
         "cached_memories_robust_{}_{}_{}".format(backend, model, keyword_pruning_mode),
@@ -215,100 +339,51 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
 
-    for sample_idx, sample in enumerate(samples):
-        agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port)
+    worker_count = max(1, min(max_workers, len(samples)))
+    eval_logger.info(f"Sample worker count: {worker_count}")
 
-        memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
-        retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
-        retriever_cache_embeddings_file = os.path.join(
-            memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
-        )
-
-        if os.path.exists(memory_cache_file):
-            eval_logger.info(f"Loading cached memories for sample {sample_idx}")
-            with open(memory_cache_file, 'rb') as f:
-                cached_memories = pickle.load(f)
-            agent.memory_system.memories = cached_memories
-            if os.path.exists(retriever_cache_file):
-                eval_logger.info(f"Found retriever cache files")
-                agent.memory_system.retriever = agent.memory_system.retriever.load(
-                    retriever_cache_file, retriever_cache_embeddings_file
+    if worker_count == 1:
+        sample_outputs = [
+            evaluate_sample(
+                sample_idx, sample, model, backend, retrieve_k, temperature_c5,
+                sglang_host, sglang_port, memories_dir, allow_categories,
+                eval_logger, show_progress=True,
+            )
+            for sample_idx, sample in enumerate(samples)
+        ]
+    else:
+        sample_outputs = []
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    evaluate_sample,
+                    sample_idx,
+                    sample,
+                    model,
+                    backend,
+                    retrieve_k,
+                    temperature_c5,
+                    sglang_host,
+                    sglang_port,
+                    memories_dir,
+                    allow_categories,
+                    eval_logger,
+                    False,
                 )
-            else:
-                eval_logger.info(f"No retriever cache found, loading from memory")
-                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
-                    cached_memories, 'all-MiniLM-L6-v2'
-                )
-            eval_logger.info(f"Successfully loaded {len(cached_memories)} memories")
-        else:
-            eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
-
-            # 先統計 turn 總數，讓 tqdm 能顯示正確進度
-            all_turns = [
-                (turns.date_time, turn)
-                for _, turns in sample.conversation.sessions.items()
-                for turn in turns.turns
+                for sample_idx, sample in enumerate(samples)
             ]
-            with tqdm(all_turns, desc=f"[Sample {sample_idx}] Building memories",
-                      unit="turn", dynamic_ncols=True) as pbar:
-                for turn_datatime, turn in pbar:
-                    conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
-                    agent.add_memory(conversation_tmp, time=turn_datatime)
-                    mem_count = len(agent.memory_system.memories)
-                    pbar.set_postfix(memories=mem_count)
+            with tqdm(as_completed(futures), total=len(futures),
+                      desc="Samples", unit="sample", dynamic_ncols=True) as pbar:
+                for future in pbar:
+                    sample_outputs.append(future.result())
 
-            memories_to_cache = agent.memory_system.memories
-            with open(memory_cache_file, 'wb') as f:
-                pickle.dump(memories_to_cache, f)
-            agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
-            eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
-
-        eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
-
-        eligible_qas = [qa for qa in sample.qa if int(qa.category) in allow_categories]
-        with tqdm(eligible_qas, desc=f"[Sample {sample_idx}] Answering QAs",
-                  unit="qa", dynamic_ncols=True) as pbar:
-            for qa in pbar:
-                total_questions += 1
-                category_counts[qa.category] += 1
-                pbar.set_postfix(cat=qa.category, total=total_questions)
-
-                prediction, user_prompt, raw_context = agent.answer_question(
-                    qa.question, qa.category, qa.final_answer
-                )
-
-                # Parse the prediction (handles both JSON and plain text)
-                prediction = parse_plain_text_answer(prediction)
-
-                eval_logger.info(f"Question {total_questions}: {qa.question}")
-                eval_logger.info(f"Prediction: {prediction}")
-                eval_logger.info(f"Reference: {qa.final_answer}")
-                eval_logger.info(f"User Prompt: {user_prompt}")
-                eval_logger.info(f"Category: {qa.category}")
-                eval_logger.info(f"Raw Context: {raw_context}")
-
-                metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
-                    "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0,
-                    "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0,
-                    "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
-                }
-
-                all_metrics.append(metrics)
-                all_categories.append(qa.category)
-
-                result = {
-                    "sample_id": sample_idx,
-                    "question": qa.question,
-                    "prediction": prediction,
-                    "reference": qa.final_answer,
-                    "category": qa.category,
-                    "metrics": metrics,
-                }
-                results.append(result)
-
-                if total_questions % 10 == 0:
-                    eval_logger.info(f"Processed {total_questions} questions")
+    merged = merge_sample_outputs(sample_outputs)
+    results = merged["results"]
+    all_metrics = merged["metrics"]
+    all_categories = merged["categories"]
+    category_counts = merged["category_counts"]
+    total_questions = merged["total_questions"]
+    error_num = merged["error_num"]
 
     aggregate_results = aggregate_metrics(all_metrics, all_categories)
 
@@ -317,6 +392,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "dataset": dataset_path,
         "memory_layer": "robust",
         "keyword_pruning_mode": keyword_pruning_mode,
+        "sample_workers": worker_count,
         "total_questions": total_questions,
         "category_distribution": {
             str(cat): count for cat, count in category_counts.items()
@@ -375,10 +451,14 @@ def main():
                         help="Keyword pruning mode: 'none' (raw LLM keywords, no filtering), "
                              "'simple' (exact-match grounding, no NLTK stemming), "
                              "or 'nltk' (PorterStemmer derivational-variant matching)")
+    parser.add_argument("--max_workers", type=int, default=10,
+                        help="Maximum number of LoCoMo samples to evaluate in parallel")
     args = parser.parse_args()
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("Ratio must be between 0.0 and 1.0")
+    if args.max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
@@ -387,7 +467,7 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port,
-        args.keyword_pruning_mode,
+        args.keyword_pruning_mode, args.max_workers,
     )
 
 

@@ -155,6 +155,7 @@ python test_advanced_robust.py --backend ollama --model qwen2.5:3b \
 Key arguments:
 - `--retrieve_k`: Number of memories to retrieve per query (default: 10). Tune this per model for best results.
 - `--ratio`: Fraction of dataset to evaluate (e.g., `--ratio 0.1` for 10% quick test).
+- `--max_workers`: Maximum number of LoCoMo samples to evaluate in parallel (default: 10; use `--max_workers 1` for sequential execution).
 - `--backend`: One of `openai`, `vllm`, `ollama`.
 - `--sglang_port`: Port for vLLM/SGLang server (default: 30000).
 
@@ -190,4 +191,3 @@ If you use this code in your research, please cite our work:
 ## License 📄
 
 This project is licensed under the MIT License. See LICENSE for details.
-
