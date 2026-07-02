@@ -10,8 +10,8 @@ set -euo pipefail
 #   --model    <name>      Ollama model tag (default: llama3.2:1b)
 #   --dataset  <path>      Dataset JSON path (default: data/locomo10.json)
 #   --k-values <list>      Space-separated k list (default: "5 10 15")
-#   --outdir   <path>      Output directory (default: results_k_sweep_ollama)
-#   --log-dir  <path>      Log directory (default: logs/k_sweep_ollama)
+#   --outdir   <path>      Output directory (default: artifacts/results/k_sweep_ollama)
+#   --log-dir  <path>      Log directory (default: artifacts/logs/k_sweep_ollama)
 #   --help                 Show this message and exit
 #
 # Example:
@@ -20,8 +20,8 @@ set -euo pipefail
 MODEL="llama3.2:1b"
 DATASET="data/locomo10.json"
 K_VALUES=(5 10 15)
-OUTDIR="results_k_sweep_ollama"
-LOGDIR="logs/k_sweep_ollama"
+OUTDIR="artifacts/results/k_sweep_ollama"
+LOGDIR="artifacts/logs/k_sweep_ollama"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

@@ -5,12 +5,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 # Local configuration
 .env
 .env.*
 
 # Reproduction-generated artifacts
+artifacts/
 cached_memories*/
 logs/
 results_*.json
@@ -19,3 +21,4 @@ output/
 
 # Large/reference documents should be linked from README instead.
 *.pdf
+/papers/

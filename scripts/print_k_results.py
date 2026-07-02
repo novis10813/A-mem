@@ -22,7 +22,11 @@ CAT_LABELS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Print A-MEM k-sweep F1 summaries")
-    parser.add_argument("--results-dir", type=Path, default=Path("results_k_sweep_ollama"))
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path("artifacts/results/k_sweep_ollama"),
+    )
     parser.add_argument("--model", default="", help="Optional filename prefix filter")
     return parser.parse_args()
 

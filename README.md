@@ -15,7 +15,7 @@ This public fork is a reproduction-oriented extension of [WujiangXu/A-mem](https
 - fixed-memory embedding-field ablations;
 - `uv`-based environment setup for easier lab sharing.
 
-Generated caches, logs, and result files are intentionally not committed. Run the commands below to generate them locally.
+Generated caches, logs, result files, and visualization outputs are intentionally not committed. New runs should write them under `artifacts/`; run the commands below to generate them locally.
 
 ## Introduction 🌟
 
@@ -76,7 +76,7 @@ uv sync
 
 Run the non-LLM tests:
 ```bash
-uv run pytest test_ablation.py -v
+uv run python -m pytest tests/test_ablation.py -v
 ```
 
 Run a small Ollama smoke evaluation:
@@ -137,19 +137,19 @@ The robust evaluation (`test_advanced_robust.py`) removes the JSON schema depend
 ```bash
 # OpenAI models
 python test_advanced_robust.py --backend openai --model gpt-4o-mini \
-    --dataset data/locomo10.json --output results_robust_gpt-4o-mini.json
+    --dataset data/locomo10.json --output artifacts/results/robust_gpt-4o-mini.json
 
 # vLLM-served open-source models (start vLLM server first)
 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen2.5-3B-Instruct --port 30000 \
     --dtype float16 --enforce-eager --max-model-len 8192
 python test_advanced_robust.py --backend vllm --model Qwen/Qwen2.5-3B-Instruct \
-    --dataset data/locomo10.json --output results_robust_qwen3b.json \
+    --dataset data/locomo10.json --output artifacts/results/robust_qwen3b.json \
     --sglang_port 30000
 
 # Ollama models
 python test_advanced_robust.py --backend ollama --model qwen2.5:3b \
-    --dataset data/locomo10.json --output results_robust_ollama_qwen3b.json
+    --dataset data/locomo10.json --output artifacts/results/robust_ollama_qwen3b.json
 ```
 
 Key arguments:
