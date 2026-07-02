@@ -238,7 +238,7 @@ def get_dataset_statistics(samples: List[LoCoMoSample]) -> Dict:
 
 if __name__ == "__main__":
     # Example usage
-    dataset_path = Path(__file__).parent / "data" / "locomo10.json"
+    dataset_path = Path(__file__).resolve().parents[2] / "data" / "locomo10.json"
     try:
         print(f"Loading dataset from: {dataset_path}")
         samples = load_locomo_dataset(dataset_path)

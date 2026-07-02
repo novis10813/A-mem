@@ -7,15 +7,23 @@ Usage:
     python test_advanced_robust.py --backend ollama --model qwen2.5:3b --dataset data/locomo10.json
 """
 
-from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
-import llm_text_parsers as _ltp
-from llm_text_parsers import (
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from amem.memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
+from amem import llm_text_parsers as _ltp
+from amem.llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
     parse_keywords_response,
     set_keyword_pruning_mode,
 )
-from memory_pipeline import (
+from amem.memory_pipeline import (
     MemoryProcessingPipeline,
     PipelineTimingHook,
     merge_timing_summaries,
@@ -26,14 +34,14 @@ import argparse
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
-from load_dataset import load_locomo_dataset
+from amem.load_dataset import load_locomo_dataset
 import nltk
 from collections import defaultdict
 from collections import Counter
 import pickle
 import random
 from tqdm import tqdm
-from utils import calculate_metrics, aggregate_metrics
+from amem.utils import calculate_metrics, aggregate_metrics
 from datetime import datetime
 
 # Download required NLTK data

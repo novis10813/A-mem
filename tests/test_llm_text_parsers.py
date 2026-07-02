@@ -1,4 +1,4 @@
-from llm_text_parsers import _heuristic_keywords, sanitize_keywords, validate_analysis_result
+from amem.llm_text_parsers import _heuristic_keywords, sanitize_keywords, validate_analysis_result
 
 
 def test_sanitize_keywords_removes_generic_time_and_ungrounded_terms():

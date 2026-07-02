@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SRC_ROOT = REPO_ROOT / "src"
+for path in (SRC_ROOT, REPO_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-from llm_text_parsers import (
+from amem.llm_text_parsers import (
     KEYWORD_CONVERSATION_FILLERS,
     KEYWORD_FILTER_TERMS,
     KEYWORD_GENERIC_TERMS,
@@ -616,8 +618,16 @@ def write_outputs(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize A-MEM keyword pruning variants")
     parser.add_argument("--cache-dir", type=Path, required=True)
-    parser.add_argument("--output-html", type=Path, default=Path("output/keyword_pruning_comparison.html"))
-    parser.add_argument("--output-dir", type=Path, default=Path("output/keyword_pruning_comparison"))
+    parser.add_argument(
+        "--output-html",
+        type=Path,
+        default=Path("artifacts/output/keyword_pruning_comparison.html"),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("artifacts/output/keyword_pruning_comparison"),
+    )
     return parser.parse_args()
 
 

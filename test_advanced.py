@@ -1,14 +1,21 @@
-from memory_layer import LLMController, AgenticMemorySystem
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from amem.memory_layer import LLMController, AgenticMemorySystem
 import os
 import json
 import argparse
 import logging
 from typing import List, Dict, Optional, Union
 from dataclasses import dataclass
-from pathlib import Path
 import numpy as np
 from openai import OpenAI
-from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
+from amem.load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
 import nltk
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import pytorch_cos_sim
@@ -17,7 +24,7 @@ from collections import defaultdict
 import pickle
 import random
 from tqdm import tqdm
-from utils import calculate_metrics, aggregate_metrics
+from amem.utils import calculate_metrics, aggregate_metrics
 from datetime import datetime
 
 # Download required NLTK data

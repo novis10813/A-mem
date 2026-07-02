@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from openai import OpenAI
-from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
+from .load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
 from sentence_transformers.util import pytorch_cos_sim
 
 # Download required NLTK data

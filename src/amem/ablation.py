@@ -12,11 +12,11 @@ from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from llm_text_parsers import parse_plain_text_answer
-from load_dataset import load_locomo_dataset
-from memory_layer import SimpleEmbeddingRetriever
+from .llm_text_parsers import parse_plain_text_answer
+from .load_dataset import load_locomo_dataset
+from .memory_layer import SimpleEmbeddingRetriever
 from test_advanced_robust import RobustAdvancedMemAgent
-from utils import aggregate_metrics, calculate_metrics
+from .utils import aggregate_metrics, calculate_metrics
 
 
 FieldTuple = Tuple[str, ...]

@@ -10,8 +10,8 @@ PYTHON_CMD="${PYTHON_CMD:-uv run python}"
 DATASET="${DATASET:-data/locomo10.json}"
 BACKEND="${BACKEND:-ollama}"
 MODEL="${MODEL:-llama3.2:latest}"
-MEMORY_CACHE_DIR="${MEMORY_CACHE_DIR:-cached_memories_robust_ollama_llama3.2:latest-v3}"
-OUTPUT_DIR="${OUTPUT_DIR:-results_ablation/ollama_llama3.2-latest-v3_core7_k5}"
+MEMORY_CACHE_DIR="${MEMORY_CACHE_DIR:-artifacts/caches/cached_memories_robust_ollama_llama3.2:latest-v3}"
+OUTPUT_DIR="${OUTPUT_DIR:-artifacts/results/ablation/ollama_llama3.2-latest-v3_core7_k5}"
 RETRIEVE_K="${RETRIEVE_K:-5}"
 TEMPERATURE_C5="${TEMPERATURE_C5:-0.5}"
 VARIANTS="${VARIANTS:-core7}"
@@ -22,7 +22,7 @@ if [[ ! -d "$MEMORY_CACHE_DIR" ]]; then
   exit 1
 fi
 
-$PYTHON_CMD ablation.py \
+$PYTHON_CMD -m amem.ablation \
   --dataset "$DATASET" \
   --backend "$BACKEND" \
   --model "$MODEL" \

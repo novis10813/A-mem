@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from memory_layer_robust import RobustAgenticMemorySystem
-from memory_pipeline import (
+from amem.memory_layer_robust import RobustAgenticMemorySystem
+from amem.memory_pipeline import (
     MemoryProcessingPipeline,
     PipelineHook,
     PipelineTimingHook,

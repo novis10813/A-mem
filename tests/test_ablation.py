@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import ablation
+from amem import ablation
 
 
 def make_memory(

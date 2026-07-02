@@ -10,7 +10,7 @@ resolution-markers = [
 [[package]]
 name = "a-mem"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "bert-score" },
     { name = "litellm" },

@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SRC_ROOT = REPO_ROOT / "src"
+for path in (SRC_ROOT, REPO_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-from llm_text_parsers import _keyword_tokens, _normalize_keyword, _parse_list_items, sanitize_keywords
+from amem.llm_text_parsers import _keyword_tokens, _normalize_keyword, _parse_list_items, sanitize_keywords
 
 
 def iter_cache_files(cache_dir: Path) -> list[Path]:
