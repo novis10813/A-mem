@@ -10,6 +10,7 @@ __pycache__/
 # Local configuration
 .env
 .env.*
+.worktrees
 
 # Reproduction-generated artifacts
 artifacts/
@@ -22,3 +23,4 @@ output/
 # Large/reference documents should be linked from README instead.
 *.pdf
 /papers/
+docs/
