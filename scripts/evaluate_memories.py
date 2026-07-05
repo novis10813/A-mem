@@ -42,6 +42,7 @@ from experiment_common import (  # noqa: E402
 )
 from amem.load_dataset import load_locomo_dataset  # noqa: E402
 from amem.memory_layer_robust import RobustLLMController  # noqa: E402
+from amem.reranking import DEFAULT_CROSS_ENCODER_MODEL, build_reranker  # noqa: E402
 from test_advanced_robust import RobustAdvancedMemAgent, merge_sample_outputs  # noqa: E402
 from amem.utils import aggregate_metrics, calculate_metrics  # noqa: E402
 from amem.llm_text_parsers import parse_plain_text_answer  # noqa: E402
@@ -132,6 +133,7 @@ def load_robust_agent_from_cache(
     sample_idx: int,
     args: argparse.Namespace,
 ) -> RobustAdvancedMemAgent:
+    reranker = build_reranker(args.rerank_mode, args.rerank_model, args.rerank_batch_size)
     agent = RobustAdvancedMemAgent(
         args.model,
         args.backend,
@@ -139,6 +141,8 @@ def load_robust_agent_from_cache(
         args.temperature_c5,
         args.sglang_host,
         args.sglang_port,
+        reranker=reranker,
+        rerank_top_n=args.rerank_top_n,
     )
     memory_cache_file = cache_dir / f"memory_cache_sample_{sample_idx}.pkl"
     retriever_cache_file = cache_dir / f"retriever_cache_sample_{sample_idx}.pkl"
@@ -190,10 +194,12 @@ def evaluate_robust_sample(
                 "sample_id": sample_idx,
                 "qa_idx": qa_idx,
                 "question": qa.question,
+                "query_keywords": agent.last_retrieval_info.get("query_keywords", ""),
                 "prediction": prediction,
                 "reference": qa.final_answer,
                 "category": int(qa.category),
                 "metrics": metrics,
+                "retrieval_info": agent.last_retrieval_info,
                 "raw_context": raw_context,
                 "user_prompt": user_prompt,
             }
@@ -251,6 +257,10 @@ def evaluate_robust_run(
         ),
         "backend": args.backend,
         "retrieve_k": args.retrieve_k,
+        "rerank_mode": args.rerank_mode,
+        "rerank_model": args.rerank_model if args.rerank_mode != "off" else None,
+        "rerank_top_n": args.rerank_top_n if args.rerank_mode != "off" else None,
+        "rerank_batch_size": args.rerank_batch_size if args.rerank_mode != "off" else None,
         "temperature_c5": args.temperature_c5,
         "total_questions": merged["total_questions"],
         "category_distribution": dict(merged["category_counts"]),
@@ -461,6 +471,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260701)
     parser.add_argument("--embedding-model", default="all-MiniLM-L6-v2")
+    parser.add_argument("--rerank-mode", choices=["off", "cross_encoder"], default="off")
+    parser.add_argument("--rerank-model", default=DEFAULT_CROSS_ENCODER_MODEL)
+    parser.add_argument("--rerank-top-n", type=int, default=50)
+    parser.add_argument("--rerank-batch-size", type=int, default=32)
     parser.add_argument("--sglang_host", default="http://localhost")
     parser.add_argument("--sglang_port", type=int, default=30000)
     parser.add_argument("--resume", action="store_true")
@@ -486,6 +500,12 @@ def main() -> None:
         raise ValueError("--ratio must be between 0.0 and 1.0")
     if args.retrieve_k < 1:
         raise ValueError("--retrieve-k must be >= 1")
+    if args.rerank_top_n < 1:
+        raise ValueError("--rerank-top-n must be >= 1")
+    if args.rerank_batch_size < 1:
+        raise ValueError("--rerank-batch-size must be >= 1")
+    if args.rerank_mode != "off" and args.rerank_top_n < args.retrieve_k:
+        raise ValueError("--rerank-top-n must be >= --retrieve-k when reranking is enabled")
     if args.max_workers < 1:
         raise ValueError("--max-workers must be >= 1")
 
@@ -502,6 +522,10 @@ def main() -> None:
             "qa_mode": args.qa_mode,
             "qa_runs": args.qa_runs,
             "keyword_conditions": list(args.keyword_conditions),
+            "rerank_mode": args.rerank_mode,
+            "rerank_model": args.rerank_model if args.rerank_mode != "off" else None,
+            "rerank_top_n": args.rerank_top_n if args.rerank_mode != "off" else None,
+            "rerank_batch_size": args.rerank_batch_size if args.rerank_mode != "off" else None,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         },
     )

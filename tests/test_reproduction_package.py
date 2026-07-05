@@ -55,3 +55,45 @@ def test_two_stage_wrapper_defaults_to_artifacts_directory():
     assert 'cache_root="artifacts/caches"' in wrapper
     assert 'results_root="artifacts/results"' in wrapper
     assert 'log_root="artifacts/logs"' in wrapper
+
+
+def test_two_stage_wrapper_forwards_reranker_flags_to_evaluation_only():
+    wrapper = (ROOT / "scripts" / "run_experiment.sh").read_text(encoding="utf-8")
+
+    assert 'rerank_mode="off"' in wrapper
+    assert "--rerank-mode" in wrapper
+    assert "--rerank-model" in wrapper
+    assert "--rerank-top-n" in wrapper
+    assert "--rerank-batch-size" in wrapper
+    build_section = wrapper.split("build_cmd=(", 1)[1].split("eval_cmd=(", 1)[0]
+    eval_section = wrapper.split("eval_cmd=(", 1)[1].split(")", 1)[0]
+    assert "--rerank-mode" not in build_section
+    assert "--rerank-mode" in eval_section
+
+
+def test_retrieval_design_docs_are_linked_from_agents_guide():
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    design_doc = ROOT / "docs" / "retrieval_reranker_design_zh.md"
+    baseline_doc = ROOT / "docs" / "baseline_comparison_zh.md"
+
+    assert design_doc.exists()
+    assert baseline_doc.exists()
+    assert "docs/retrieval_reranker_design_zh.md" in agents
+    assert "docs/baseline_comparison_zh.md" in agents
+
+
+def test_baseline_doc_records_core_retrieval_comparison_terms():
+    baseline_doc = (ROOT / "docs" / "baseline_comparison_zh.md").read_text(
+        encoding="utf-8"
+    )
+
+    required_terms = [
+        "retrieve_k",
+        "rerank_top_n",
+        "content_keywords",
+        "keyword_pruning_mode",
+        "cross_encoder",
+        "ollama_llama3.2-1b_none_rerank_k10",
+    ]
+    for term in required_terms:
+        assert term in baseline_doc

@@ -27,6 +27,7 @@ from .memory_pipeline import (
     MemoryPipelineStageError,
     MemoryProcessingPipeline,
 )
+from .reranking import BaseReranker
 from .llm_text_parsers import (
     ANALYZE_CONTENT_PROMPT,
     EVOLUTION_DECISION_PROMPT,
@@ -367,7 +368,9 @@ class RobustAgenticMemorySystem:
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
                  check_connection: bool = False,
-                 pipeline: Optional[MemoryProcessingPipeline] = None):
+                 pipeline: Optional[MemoryProcessingPipeline] = None,
+                 reranker: Optional[BaseReranker] = None,
+                 rerank_top_n: Optional[int] = None):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
         self.retriever = SimpleEmbeddingRetriever(model_name)
@@ -378,6 +381,9 @@ class RobustAgenticMemorySystem:
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold
         self.pipeline = pipeline or MemoryProcessingPipeline()
+        self.reranker = reranker
+        self.rerank_top_n = rerank_top_n
+        self.last_retrieval_info: Dict[str, Any] = {}
 
     # ---- public API (mirrors AgenticMemorySystem) ----
 
@@ -435,12 +441,70 @@ class RobustAgenticMemorySystem:
                 memory.context + " keywords: " + ", ".join(memory.keywords)
             ])
 
-    def find_related_memories(self, query: str, k: int = 5) -> tuple:
+    def _memory_rerank_text(self, memory: RobustMemoryNote) -> str:
+        return (
+            "talk start time: " + str(memory.timestamp) + "\n"
+            "memory content: " + str(memory.content) + "\n"
+            "memory context: " + str(memory.context) + "\n"
+            "memory keywords: " + ", ".join(str(keyword) for keyword in memory.keywords) + "\n"
+            "memory tags: " + ", ".join(str(tag) for tag in memory.tags)
+        )
+
+    def _select_memory_indices(
+        self,
+        similarity_query: str,
+        k: int,
+        rerank_query: Optional[str] = None,
+    ) -> list[int]:
+        candidate_k = k
+        if self.reranker is not None:
+            candidate_k = max(k, self.rerank_top_n or k)
+
+        candidate_indices = [int(index) for index in self.retriever.search(similarity_query, candidate_k)]
+        final_indices = candidate_indices[:k]
+        rerank_scores: list[float] = []
+
+        if self.reranker is not None and candidate_indices:
+            all_memories = list(self.memories.values())
+            candidates = [
+                (index, self._memory_rerank_text(all_memories[index]))
+                for index in candidate_indices
+            ]
+            reranked = self.reranker.rerank(rerank_query or similarity_query, candidates, k)
+            final_indices = [candidate.index for candidate in reranked]
+            rerank_scores = [candidate.score for candidate in reranked]
+
+        self.last_retrieval_info = {
+            "similarity_query": similarity_query,
+            "rerank_query": rerank_query,
+            "candidate_k": candidate_k,
+            "candidate_indices": candidate_indices,
+            "final_indices": final_indices,
+            "rerank_scores": rerank_scores,
+            "rerank_mode": getattr(self.reranker, "mode", "off") if self.reranker else "off",
+        }
+        return final_indices
+
+    def find_related_memories(
+        self,
+        query: str,
+        k: int = 5,
+        rerank_query: Optional[str] = None,
+    ) -> tuple:
         """Find related memories using embedding retrieval."""
         if not self.memories:
+            self.last_retrieval_info = {
+                "similarity_query": query,
+                "rerank_query": rerank_query,
+                "candidate_k": 0,
+                "candidate_indices": [],
+                "final_indices": [],
+                "rerank_scores": [],
+                "rerank_mode": getattr(self.reranker, "mode", "off") if self.reranker else "off",
+            }
             return "", []
 
-        indices = self.retriever.search(query, k)
+        indices = self._select_memory_indices(query, k, rerank_query)
         all_memories = list(self.memories.values())
         memory_str = ""
         for i in indices:
@@ -454,12 +518,26 @@ class RobustAgenticMemorySystem:
             )
         return memory_str, indices
 
-    def find_related_memories_raw(self, query: str, k: int = 5) -> str:
+    def find_related_memories_raw(
+        self,
+        query: str,
+        k: int = 5,
+        rerank_query: Optional[str] = None,
+    ) -> str:
         """Find related memories with neighborhood expansion."""
         if not self.memories:
+            self.last_retrieval_info = {
+                "similarity_query": query,
+                "rerank_query": rerank_query,
+                "candidate_k": 0,
+                "candidate_indices": [],
+                "final_indices": [],
+                "rerank_scores": [],
+                "rerank_mode": getattr(self.reranker, "mode", "off") if self.reranker else "off",
+            }
             return ""
 
-        indices = self.retriever.search(query, k)
+        indices = self._select_memory_indices(query, k, rerank_query)
         all_memories = list(self.memories.values())
         memory_str = ""
         for i in indices:

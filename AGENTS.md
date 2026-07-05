@@ -9,6 +9,7 @@ This is a reproduction-oriented fork of A-Mem. The actual repo root is this dire
 - Core evaluation code:
   - `test_advanced_robust.py`: robust LoCoMo evaluation entrypoint.
   - `src/amem/memory_layer_robust.py`: robust memory system and LLM backend controllers.
+  - `src/amem/reranking.py`: optional second-stage retrieval rerankers.
   - `src/amem/llm_text_parsers.py`: plain-text parsers and keyword pruning modes.
   - `src/amem/ablation.py`: fixed-memory embedding-field ablations.
 - Preferred two-stage experiment entrypoints:
@@ -16,6 +17,7 @@ This is a reproduction-oriented fork of A-Mem. The actual repo root is this dire
   - `scripts/evaluate_memories.py`: QA-evaluation stage; reads existing caches.
   - `scripts/run_experiment.sh`: convenience wrapper that builds first, then evaluates.
 - Experiment and analysis tools live in `scripts/`.
+- Design notes and baseline comparisons live in `docs/`.
 - Pytest tests live in `tests/`; root-level `test_advanced*.py` files are evaluation entrypoints kept for compatibility.
 - Library code lives in `src/amem/`; root-level modules such as `memory_layer_robust.py` are thin compatibility shims.
 - Dataset lives in `data/`.
@@ -84,6 +86,43 @@ uv run python test_advanced_robust.py \
   --keyword_pruning_mode nltk
 ```
 
+## Retrieval and Reranking Designs
+
+Detailed design notes:
+
+- `docs/retrieval_reranker_design_zh.md`: robust retrieval, content+keyword retrieval, and CrossEncoder reranker data flow.
+- `docs/baseline_comparison_zh.md`: baseline matrix and guidance for comparing construction, retrieval, keyword pruning, and reranking variants.
+
+Robust retrieval baseline:
+
+- `retrieve_k` is the final number of memories placed into the answer prompt.
+- With reranking disabled (`--rerank-mode off`), robust retrieval uses the existing embedding retriever directly.
+
+CrossEncoder reranker:
+
+- Only applies to robust QA evaluation.
+- First-stage embedding retrieval takes `--rerank-top-n` candidates.
+- CrossEncoder scores `(original question, candidate memory text)` pairs.
+- Final answer context keeps the top `--retrieve-k` reranked memories.
+- Reranker runs during QA evaluation and does not change memory cache construction.
+
+Example robust reranker evaluation from an existing two-stage cache:
+
+```bash
+uv run python scripts/evaluate_memories.py \
+  --experiment-id ollama_llama3.2-1b_none_rerank_k10 \
+  --dataset data/locomo10.json \
+  --backend ollama \
+  --model llama3.2:1b \
+  --qa-mode robust \
+  --qa-runs 1 \
+  --retrieve-k 10 \
+  --rerank-mode cross_encoder \
+  --rerank-top-n 50 \
+  --rerank-batch-size 32 \
+  --resume
+```
+
 ## Experiment Tools
 
 `scripts/` is the experiment, analysis, and visualization tool area.
@@ -135,6 +174,25 @@ bash scripts/run_experiment.sh \
   --keyword-pruning-mode nltk \
   --keyword-conditions none,nltk \
   --retrieve-k 10 \
+  --resume
+```
+
+Run both stages with robust CrossEncoder reranking:
+
+```bash
+bash scripts/run_experiment.sh \
+  --experiment-id ollama_llama3.2-1b_none_rerank_k10 \
+  --backend ollama \
+  --model llama3.2:1b \
+  --construction-runs 1 \
+  --qa-runs 1 \
+  --qa-mode robust \
+  --keyword-pruning-mode none \
+  --retrieve-k 10 \
+  --rerank-mode cross_encoder \
+  --rerank-top-n 50 \
+  --rerank-batch-size 32 \
+  --max-workers 10 \
   --resume
 ```
 
@@ -231,6 +289,19 @@ For new two-stage entrypoint changes, run focused tests and compile checks:
 ```bash
 uv run python -m py_compile scripts/experiment_common.py scripts/build_memories.py scripts/evaluate_memories.py
 uv run python -m pytest tests/test_experiment_common.py tests/test_experiment_entrypoints.py -v
+```
+
+For reranker changes, run:
+
+```bash
+uv run python -m py_compile src/amem/reranking.py src/amem/memory_layer_robust.py scripts/evaluate_memories.py test_advanced_robust.py
+uv run python -m pytest tests/test_reranking.py tests/test_memory_pipeline.py tests/test_reproduction_package.py -v
+```
+
+For docs-only changes, run:
+
+```bash
+uv run python -m pytest tests/test_reproduction_package.py -v
 ```
 
 Use `uv run python -m pytest ...` if direct `uv run pytest ...` resolves to a non-project pytest.

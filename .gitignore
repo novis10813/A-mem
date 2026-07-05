@@ -24,3 +24,7 @@ output/
 *.pdf
 /papers/
 docs/
+!docs/
+docs/*
+!docs/retrieval_reranker_design_zh.md
+!docs/baseline_comparison_zh.md

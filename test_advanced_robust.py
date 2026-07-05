@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from amem.memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
+from amem.reranking import DEFAULT_CROSS_ENCODER_MODEL, build_reranker
 from amem import llm_text_parsers as _ltp
 from amem.llm_text_parsers import (
     parse_plain_text_answer,
@@ -60,7 +61,7 @@ class RobustAdvancedMemAgent:
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
                  sglang_host="http://localhost", sglang_port=30000,
-                 memory_pipeline=None):
+                 memory_pipeline=None, reranker=None, rerank_top_n=None):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -68,6 +69,8 @@ class RobustAdvancedMemAgent:
             sglang_host=sglang_host,
             sglang_port=sglang_port,
             pipeline=memory_pipeline,
+            reranker=reranker,
+            rerank_top_n=rerank_top_n,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -78,12 +81,15 @@ class RobustAdvancedMemAgent:
         )
         self.retrieve_k = retrieve_k
         self.temperature_c5 = temperature_c5
+        self.last_retrieval_info = {}
 
     def add_memory(self, content, time=None):
         self.memory_system.add_note(content, time=time)
 
-    def retrieve_memory(self, content, k=10):
-        return self.memory_system.find_related_memories_raw(content, k=k)
+    def retrieve_memory(self, content, k=10, rerank_query=None):
+        return self.memory_system.find_related_memories_raw(
+            content, k=k, rerank_query=rerank_query
+        )
 
     def retrieve_memory_llm(self, memories_text, query):
         """Select relevant parts of conversation memories — plain text, no JSON schema."""
@@ -116,7 +122,11 @@ Keywords:"""
     def answer_question(self, question: str, category: int, answer: str) -> tuple:
         """Generate answer for a question — plain text, no JSON schema."""
         keywords = self.generate_query_llm(question)
-        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
+        raw_context = self.retrieve_memory(
+            keywords, k=self.retrieve_k, rerank_query=question
+        )
+        self.last_retrieval_info = dict(self.memory_system.last_retrieval_info)
+        self.last_retrieval_info["query_keywords"] = keywords
         context = raw_context
 
         assert category in [1, 2, 3, 4, 5]
@@ -217,12 +227,19 @@ def evaluate_sample(sample_idx: int, sample, model: str, backend: str,
                     sglang_host: str, sglang_port: int,
                     memories_dir: str, allow_categories,
                     eval_logger: logging.Logger,
-                    show_progress: bool = True):
+                    show_progress: bool = True,
+                    rerank_mode: str = "off",
+                    rerank_model: str = DEFAULT_CROSS_ENCODER_MODEL,
+                    rerank_top_n: Optional[int] = None,
+                    rerank_batch_size: int = 32):
     """Evaluate one LoCoMo sample with an isolated agent and cache files."""
     timing_hook = PipelineTimingHook()
     memory_pipeline = MemoryProcessingPipeline(hooks=[timing_hook])
-    agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                   sglang_host, sglang_port, memory_pipeline)
+    reranker = build_reranker(rerank_mode, rerank_model, rerank_batch_size)
+    agent = RobustAdvancedMemAgent(
+        model, backend, retrieve_k, temperature_c5,
+        sglang_host, sglang_port, memory_pipeline, reranker, rerank_top_n,
+    )
 
     memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
     retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -313,6 +330,7 @@ def evaluate_sample(sample_idx: int, sample, model: str, backend: str,
                 "reference": qa.final_answer,
                 "category": qa.category,
                 "metrics": metrics,
+                "retrieval_info": agent.last_retrieval_info,
             })
 
             if total_questions % 10 == 0:
@@ -333,10 +351,16 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      ratio: float = 1.0, backend: str = "sglang",
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
-                     keyword_pruning_mode: str = "nltk", max_workers: int = 10):
+                     keyword_pruning_mode: str = "nltk", max_workers: int = 10,
+                     rerank_mode: str = "off",
+                     rerank_model: str = DEFAULT_CROSS_ENCODER_MODEL,
+                     rerank_top_n: Optional[int] = None,
+                     rerank_batch_size: int = 32):
     """Evaluate the robust agent on the LoComo dataset."""
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
+    if rerank_mode != "off" and (rerank_top_n is None or rerank_top_n < retrieve_k):
+        raise ValueError("rerank_top_n must be >= retrieve_k when reranking is enabled")
 
     # Configure keyword pruning mode before any memory operations
     set_keyword_pruning_mode(keyword_pruning_mode)
@@ -350,6 +374,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     eval_logger.info(f"Loading dataset from {dataset_path}")
     eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
     eval_logger.info(f"Keyword pruning mode: {keyword_pruning_mode}")
+    eval_logger.info(f"Rerank mode: {rerank_mode}")
 
     samples = load_locomo_dataset(dataset_path)
     eval_logger.info(f"Loaded {len(samples)} samples")
@@ -375,6 +400,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 sample_idx, sample, model, backend, retrieve_k, temperature_c5,
                 sglang_host, sglang_port, memories_dir, allow_categories,
                 eval_logger, show_progress=True,
+                rerank_mode=rerank_mode,
+                rerank_model=rerank_model,
+                rerank_top_n=rerank_top_n,
+                rerank_batch_size=rerank_batch_size,
             )
             for sample_idx, sample in enumerate(samples)
         ]
@@ -396,6 +425,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     allow_categories,
                     eval_logger,
                     False,
+                    rerank_mode,
+                    rerank_model,
+                    rerank_top_n,
+                    rerank_batch_size,
                 )
                 for sample_idx, sample in enumerate(samples)
             ]
@@ -421,6 +454,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "dataset": dataset_path,
         "memory_layer": "robust",
         "keyword_pruning_mode": keyword_pruning_mode,
+        "rerank_mode": rerank_mode,
+        "rerank_model": rerank_model if rerank_mode != "off" else None,
+        "rerank_top_n": rerank_top_n if rerank_mode != "off" else None,
+        "rerank_batch_size": rerank_batch_size if rerank_mode != "off" else None,
         "sample_workers": worker_count,
         "total_questions": total_questions,
         "category_distribution": {
@@ -508,12 +545,22 @@ def main():
                              "or 'nltk' (PorterStemmer derivational-variant matching)")
     parser.add_argument("--max_workers", type=int, default=10,
                         help="Maximum number of LoCoMo samples to evaluate in parallel")
+    parser.add_argument("--rerank-mode", choices=["off", "cross_encoder"], default="off",
+                        help="Optional second-stage reranker for robust retrieval")
+    parser.add_argument("--rerank-model", default=DEFAULT_CROSS_ENCODER_MODEL,
+                        help="CrossEncoder model for --rerank-mode cross_encoder")
+    parser.add_argument("--rerank-top-n", type=int, default=50,
+                        help="Similarity candidate count before reranking")
+    parser.add_argument("--rerank-batch-size", type=int, default=32,
+                        help="CrossEncoder prediction batch size")
     args = parser.parse_args()
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("Ratio must be between 0.0 and 1.0")
     if args.max_workers < 1:
         raise ValueError("max_workers must be at least 1")
+    if args.rerank_batch_size < 1:
+        raise ValueError("rerank_batch_size must be at least 1")
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
@@ -523,6 +570,8 @@ def main():
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port,
         args.keyword_pruning_mode, args.max_workers,
+        args.rerank_mode, args.rerank_model, args.rerank_top_n,
+        args.rerank_batch_size,
     )
 
 

@@ -28,6 +28,36 @@ class FakeRetriever:
         self.documents.extend(documents)
 
 
+class SearchingRetriever:
+    def __init__(self, indices):
+        self.indices = indices
+        self.calls = []
+
+    def search(self, query, k):
+        self.calls.append((query, k))
+        return self.indices[:k]
+
+
+class ScoreReranker:
+    mode = "test"
+
+    def __init__(self, ordered_indices):
+        self.ordered_indices = ordered_indices
+        self.calls = []
+
+    def rerank(self, query, candidates, top_k):
+        self.calls.append((query, candidates, top_k))
+        scores = {
+            index: float(len(self.ordered_indices) - rank)
+            for rank, index in enumerate(self.ordered_indices)
+        }
+        return [
+            SimpleNamespace(index=index, score=scores[index])
+            for index in self.ordered_indices
+            if index in {candidate[0] for candidate in candidates}
+        ][:top_k]
+
+
 class FakeSystem:
     def __init__(self):
         self.calls = []
@@ -163,6 +193,83 @@ def test_add_note_stores_constructed_note_when_link_stage_fails():
     assert system.memories == {"note-link-failed": note}
     assert system.retriever.documents == ["constructed context keywords: constructed"]
     assert system.evo_cnt == 0
+
+
+def test_find_related_memories_uses_rerank_candidate_pool_then_final_k():
+    memories = {
+        f"note-{idx}": SimpleNamespace(
+            id=f"note-{idx}",
+            timestamp=f"2026-01-0{idx}",
+            content=f"content {idx}",
+            context=f"context {idx}",
+            keywords=[f"keyword-{idx}"],
+            tags=[f"tag-{idx}"],
+            links=[],
+        )
+        for idx in range(4)
+    }
+    retriever = SearchingRetriever([0, 1, 2, 3])
+    reranker = ScoreReranker([2, 0, 1, 3])
+    system = RobustAgenticMemorySystem.__new__(RobustAgenticMemorySystem)
+    system.memories = memories
+    system.retriever = retriever
+    system.reranker = reranker
+    system.rerank_top_n = 4
+    system.last_retrieval_info = {}
+
+    context = RobustAgenticMemorySystem.find_related_memories_raw(
+        system,
+        "similarity keywords",
+        k=2,
+        rerank_query="original question",
+    )
+
+    assert retriever.calls == [("similarity keywords", 4)]
+    assert reranker.calls[0][0] == "original question"
+    assert reranker.calls[0][2] == 2
+    assert "memory content: content 2" in context
+    assert "memory content: content 0" in context
+    assert "memory content: content 1" not in context
+    assert system.last_retrieval_info == {
+        "similarity_query": "similarity keywords",
+        "rerank_query": "original question",
+        "candidate_k": 4,
+        "candidate_indices": [0, 1, 2, 3],
+        "final_indices": [2, 0],
+        "rerank_scores": [4.0, 3.0],
+        "rerank_mode": "test",
+    }
+
+
+def test_find_related_memories_keeps_existing_k_when_reranker_disabled():
+    memories = {
+        f"note-{idx}": SimpleNamespace(
+            id=f"note-{idx}",
+            timestamp=f"2026-01-0{idx}",
+            content=f"content {idx}",
+            context=f"context {idx}",
+            keywords=[f"keyword-{idx}"],
+            tags=[],
+            links=[],
+        )
+        for idx in range(3)
+    }
+    retriever = SearchingRetriever([2, 1, 0])
+    system = RobustAgenticMemorySystem.__new__(RobustAgenticMemorySystem)
+    system.memories = memories
+    system.retriever = retriever
+    system.reranker = None
+    system.rerank_top_n = None
+    system.last_retrieval_info = {}
+
+    context = RobustAgenticMemorySystem.find_related_memories_raw(system, "query", k=2)
+
+    assert retriever.calls == [("query", 2)]
+    assert "memory content: content 2" in context
+    assert "memory content: content 1" in context
+    assert "memory content: content 0" not in context
+    assert system.last_retrieval_info["final_indices"] == [2, 1]
+    assert system.last_retrieval_info["rerank_mode"] == "off"
 
 
 def test_pipeline_timing_hook_records_stage_summary():

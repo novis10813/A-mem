@@ -18,6 +18,10 @@ Options:
   --keyword-pruning-mode none|simple|nltk
   --keyword-conditions LIST
   --retrieve-k N
+  --rerank-mode off|cross_encoder
+  --rerank-model NAME
+  --rerank-top-n N
+  --rerank-batch-size N
   --temperature-c5 FLOAT
   --ratio FLOAT
   --sample-limit N
@@ -44,6 +48,10 @@ qa_mode="content_keywords"
 keyword_pruning_mode="nltk"
 keyword_conditions="none,nltk"
 retrieve_k="10"
+rerank_mode="off"
+rerank_model="cross-encoder/ms-marco-MiniLM-L6-v2"
+rerank_top_n="50"
+rerank_batch_size="32"
 temperature_c5="0.5"
 ratio="1.0"
 sample_limit=""
@@ -67,6 +75,10 @@ while [[ $# -gt 0 ]]; do
     --keyword-pruning-mode) keyword_pruning_mode="$2"; shift 2 ;;
     --keyword-conditions) keyword_conditions="$2"; shift 2 ;;
     --retrieve-k|--retrieve_k) retrieve_k="$2"; shift 2 ;;
+    --rerank-mode) rerank_mode="$2"; shift 2 ;;
+    --rerank-model) rerank_model="$2"; shift 2 ;;
+    --rerank-top-n) rerank_top_n="$2"; shift 2 ;;
+    --rerank-batch-size) rerank_batch_size="$2"; shift 2 ;;
     --temperature-c5|--temperature_c5) temperature_c5="$2"; shift 2 ;;
     --ratio) ratio="$2"; shift 2 ;;
     --sample-limit) sample_limit="$2"; shift 2 ;;
@@ -122,6 +134,10 @@ eval_cmd=(
   --qa-mode "$qa_mode"
   --keyword-conditions "$keyword_conditions"
   --retrieve-k "$retrieve_k"
+  --rerank-mode "$rerank_mode"
+  --rerank-model "$rerank_model"
+  --rerank-top-n "$rerank_top_n"
+  --rerank-batch-size "$rerank_batch_size"
   --temperature-c5 "$temperature_c5"
   --ratio "$ratio"
   --max-workers "$max_workers"
