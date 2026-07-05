@@ -61,7 +61,8 @@ class RobustAdvancedMemAgent:
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
                  sglang_host="http://localhost", sglang_port=30000,
-                 memory_pipeline=None, reranker=None, rerank_top_n=None):
+                 memory_pipeline=None, reranker=None, rerank_top_n=None,
+                 retrieval_mode="embedding"):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -71,6 +72,7 @@ class RobustAdvancedMemAgent:
             pipeline=memory_pipeline,
             reranker=reranker,
             rerank_top_n=rerank_top_n,
+            retrieval_mode=retrieval_mode,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,

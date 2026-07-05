@@ -97,6 +97,7 @@ Robust retrieval baseline:
 
 - `retrieve_k` is the final number of memories placed into the answer prompt.
 - With reranking disabled (`--rerank-mode off`), robust retrieval uses the existing embedding retriever directly.
+- BM25 first-stage retrieval is evaluation-only for robust QA via `--retrieval-mode bm25`; use `--cache-experiment-id` to compare BM25 and embedding on the same memory cache.
 
 CrossEncoder reranker:
 
@@ -117,6 +118,7 @@ uv run python scripts/evaluate_memories.py \
   --qa-mode robust \
   --qa-runs 1 \
   --retrieve-k 10 \
+  --retrieval-mode embedding \
   --rerank-mode cross_encoder \
   --rerank-top-n 50 \
   --rerank-batch-size 32 \
@@ -189,6 +191,7 @@ bash scripts/run_experiment.sh \
   --qa-mode robust \
   --keyword-pruning-mode none \
   --retrieve-k 10 \
+  --retrieval-mode embedding \
   --rerank-mode cross_encoder \
   --rerank-top-n 50 \
   --rerank-batch-size 32 \

@@ -10,7 +10,7 @@ Key differences from the original:
   - Graceful degradation: evolution failure -> memory stored without evolution
 """
 
-from typing import List, Dict, Optional, Literal, Any
+from typing import List, Dict, Optional, Literal, Any, Sequence
 import json
 import re
 import uuid
@@ -21,27 +21,62 @@ import functools
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-from .memory_layer import SimpleEmbeddingRetriever, simple_tokenize
 from .memory_pipeline import (
     MemoryPipelineContext,
     MemoryPipelineStageError,
     MemoryProcessingPipeline,
 )
 from .reranking import BaseReranker
-from .llm_text_parsers import (
-    ANALYZE_CONTENT_PROMPT,
-    EVOLUTION_DECISION_PROMPT,
-    STRENGTHEN_DETAILS_PROMPT,
-    UPDATE_NEIGHBORS_PROMPT,
-    FOCUSED_KEYWORDS_PROMPT,
-    parse_analyze_content,
-    parse_evolution_decision,
-    parse_strengthen_details,
-    parse_update_neighbors,
-    validate_analysis_result,
-)
-
 logger = logging.getLogger("amem_robust")
+
+
+def _build_embedding_retriever(model_name: str):
+    from .memory_layer import SimpleEmbeddingRetriever
+
+    return SimpleEmbeddingRetriever(model_name)
+
+
+def _bm25_tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+", str(text).lower())
+
+
+def robust_retrieval_document(memory: "RobustMemoryNote") -> str:
+    return (
+        str(memory.context)
+        + " keywords: "
+        + ", ".join(str(keyword) for keyword in memory.keywords)
+    ).strip()
+
+
+class BM25MemoryRetriever:
+    """BM25 retriever with the same search interface as SimpleEmbeddingRetriever."""
+
+    def __init__(self, documents: Sequence[str] | None = None) -> None:
+        self.corpus: list[str] = []
+        self.bm25 = None
+        if documents:
+            self.add_documents(list(documents))
+
+    def add_documents(self, documents: Sequence[str]) -> None:
+        from rank_bm25 import BM25Okapi
+
+        self.corpus.extend(str(document) for document in documents)
+        tokenized_docs = [_bm25_tokenize(document) for document in self.corpus]
+        self.bm25 = BM25Okapi(tokenized_docs) if tokenized_docs else None
+
+    def search(self, query: str, k: int = 5) -> list[int]:
+        if not self.corpus or self.bm25 is None or k < 1:
+            return []
+        scores = self.bm25.get_scores(_bm25_tokenize(query))
+        ranked = sorted(
+            enumerate(float(score) for score in scores),
+            key=lambda item: (-item[1], item[0]),
+        )
+        return [int(index) for index, _ in ranked[:k]]
+
+
+def build_bm25_retriever_from_memories(memories: Dict[str, "RobustMemoryNote"]) -> BM25MemoryRetriever:
+    return BM25MemoryRetriever([robust_retrieval_document(memory) for memory in memories.values()])
 
 # ---------------------------------------------------------------------------
 # Retry decorator
@@ -323,6 +358,13 @@ class RobustMemoryNote:
     @staticmethod
     def analyze_content(content: str, llm_controller: RobustLLMController) -> Dict:
         """Analyze content using plain-text prompt + section-marker parsing."""
+        from .llm_text_parsers import (
+            ANALYZE_CONTENT_PROMPT,
+            FOCUSED_KEYWORDS_PROMPT,
+            parse_analyze_content,
+            validate_analysis_result,
+        )
+
         prompt = ANALYZE_CONTENT_PROMPT.format(content=content)
         try:
             response = llm_controller.llm.get_completion(prompt)
@@ -370,10 +412,16 @@ class RobustAgenticMemorySystem:
                  check_connection: bool = False,
                  pipeline: Optional[MemoryProcessingPipeline] = None,
                  reranker: Optional[BaseReranker] = None,
-                 rerank_top_n: Optional[int] = None):
+                 rerank_top_n: Optional[int] = None,
+                 retrieval_mode: Literal["embedding", "bm25"] = "embedding"):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
-        self.retriever = SimpleEmbeddingRetriever(model_name)
+        if retrieval_mode == "embedding":
+            self.retriever = _build_embedding_retriever(model_name)
+        elif retrieval_mode == "bm25":
+            self.retriever = BM25MemoryRetriever()
+        else:
+            raise ValueError("retrieval_mode must be 'embedding' or 'bm25'")
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
             sglang_host, sglang_port, check_connection,
@@ -383,6 +431,7 @@ class RobustAgenticMemorySystem:
         self.pipeline = pipeline or MemoryProcessingPipeline()
         self.reranker = reranker
         self.rerank_top_n = rerank_top_n
+        self.retrieval_mode = retrieval_mode
         self.last_retrieval_info: Dict[str, Any] = {}
 
     # ---- public API (mirrors AgenticMemorySystem) ----
@@ -409,10 +458,7 @@ class RobustAgenticMemorySystem:
             evo_label = False
 
         self.memories[note.id] = note
-        self.retriever.add_documents([
-            note.context +
-            " keywords: " + ", ".join(note.keywords)
-        ])
+        self.retriever.add_documents([robust_retrieval_document(note)])
         if evo_label:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
@@ -435,11 +481,12 @@ class RobustAgenticMemorySystem:
         except (AttributeError, KeyError):
             model_name = 'all-MiniLM-L6-v2'
 
-        self.retriever = SimpleEmbeddingRetriever(model_name)
+        if self.retrieval_mode == "embedding":
+            self.retriever = _build_embedding_retriever(model_name)
+        else:
+            self.retriever = BM25MemoryRetriever()
         for memory in self.memories.values():
-            self.retriever.add_documents([
-                memory.context + " keywords: " + ", ".join(memory.keywords)
-            ])
+            self.retriever.add_documents([robust_retrieval_document(memory)])
 
     def _memory_rerank_text(self, memory: RobustMemoryNote) -> str:
         return (
@@ -482,6 +529,7 @@ class RobustAgenticMemorySystem:
             "final_indices": final_indices,
             "rerank_scores": rerank_scores,
             "rerank_mode": getattr(self.reranker, "mode", "off") if self.reranker else "off",
+            "retrieval_mode": getattr(self, "retrieval_mode", "embedding"),
         }
         return final_indices
 
@@ -501,6 +549,7 @@ class RobustAgenticMemorySystem:
                 "final_indices": [],
                 "rerank_scores": [],
                 "rerank_mode": getattr(self.reranker, "mode", "off") if self.reranker else "off",
+                "retrieval_mode": getattr(self, "retrieval_mode", "embedding"),
             }
             return "", []
 
@@ -534,6 +583,7 @@ class RobustAgenticMemorySystem:
                 "final_indices": [],
                 "rerank_scores": [],
                 "rerank_mode": getattr(self.reranker, "mode", "off") if self.reranker else "off",
+                "retrieval_mode": getattr(self, "retrieval_mode", "embedding"),
             }
             return ""
 
@@ -575,6 +625,13 @@ class RobustAgenticMemorySystem:
 
     def generate_memory_links(self, context: MemoryPipelineContext) -> None:
         """Default link generation stage."""
+        from .llm_text_parsers import (
+            EVOLUTION_DECISION_PROMPT,
+            STRENGTHEN_DETAILS_PROMPT,
+            parse_evolution_decision,
+            parse_strengthen_details,
+        )
+
         note = context.note
         neighbor_memory, indices = self.find_related_memories(note.content, k=5)
         context.neighbor_memory = neighbor_memory
@@ -625,6 +682,8 @@ class RobustAgenticMemorySystem:
 
     def evolve_related_memories(self, context: MemoryPipelineContext) -> None:
         """Default memory evolution stage."""
+        from .llm_text_parsers import UPDATE_NEIGHBORS_PROMPT, parse_update_neighbors
+
         if not context.should_update:
             return
 

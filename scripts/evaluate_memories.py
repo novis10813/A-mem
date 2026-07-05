@@ -16,8 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from sentence_transformers import SentenceTransformer
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 SRC_ROOT = REPO_ROOT / "src"
@@ -25,7 +23,6 @@ for path in (SRC_ROOT, REPO_ROOT, SCRIPTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-import run_content_keyword_pruning_experiment as ck  # noqa: E402
 from experiment_common import (  # noqa: E402
     DEFAULT_CACHE_ROOT,
     DEFAULT_RESULTS_ROOT,
@@ -41,14 +38,32 @@ from experiment_common import (  # noqa: E402
     write_manifest,
 )
 from amem.load_dataset import load_locomo_dataset  # noqa: E402
-from amem.memory_layer_robust import RobustLLMController  # noqa: E402
+from amem.memory_layer_robust import (  # noqa: E402
+    RobustLLMController,
+    build_bm25_retriever_from_memories,
+)
 from amem.reranking import DEFAULT_CROSS_ENCODER_MODEL, build_reranker  # noqa: E402
-from test_advanced_robust import RobustAdvancedMemAgent, merge_sample_outputs  # noqa: E402
-from amem.utils import aggregate_metrics, calculate_metrics  # noqa: E402
-from amem.llm_text_parsers import parse_plain_text_answer  # noqa: E402
 
 
 METRICS = ("f1", "bleu1")
+
+
+def load_content_keyword_module():
+    import run_content_keyword_pruning_experiment as ck
+
+    return ck
+
+
+def load_robust_agent_class():
+    from test_advanced_robust import RobustAdvancedMemAgent
+
+    return RobustAdvancedMemAgent
+
+
+def merge_robust_sample_outputs(sample_outputs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    from test_advanced_robust import merge_sample_outputs
+
+    return merge_sample_outputs(sample_outputs)
 
 
 def select_samples(samples: Sequence[Any], ratio: float, sample_limit: int | None) -> list[Any]:
@@ -90,6 +105,7 @@ def evaluate_content_keywords_run(
     sample_states: Sequence[Any],
     args: argparse.Namespace,
 ) -> dict[str, dict[str, Any]]:
+    ck = load_content_keyword_module()
     random.seed(args.seed + construction_run * 100_000 + qa_run)
     llm = None
     if args.max_workers == 1:
@@ -104,7 +120,7 @@ def evaluate_content_keywords_run(
         result["construction_run"] = construction_run
         result["qa_run"] = qa_run
         result["source_construction_cache_dir"] = str(
-            construction_cache_dir(args.cache_root, args.experiment_id, construction_run)
+            construction_cache_dir(args.cache_root, args.cache_experiment_id, construction_run)
         )
     return results
 
@@ -132,7 +148,8 @@ def load_robust_agent_from_cache(
     cache_dir: Path,
     sample_idx: int,
     args: argparse.Namespace,
-) -> RobustAdvancedMemAgent:
+) -> Any:
+    RobustAdvancedMemAgent = load_robust_agent_class()
     reranker = build_reranker(args.rerank_mode, args.rerank_model, args.rerank_batch_size)
     agent = RobustAdvancedMemAgent(
         args.model,
@@ -143,6 +160,7 @@ def load_robust_agent_from_cache(
         args.sglang_port,
         reranker=reranker,
         rerank_top_n=args.rerank_top_n,
+        retrieval_mode=args.retrieval_mode,
     )
     memory_cache_file = cache_dir / f"memory_cache_sample_{sample_idx}.pkl"
     retriever_cache_file = cache_dir / f"retriever_cache_sample_{sample_idx}.pkl"
@@ -151,7 +169,11 @@ def load_robust_agent_from_cache(
         raise FileNotFoundError(f"Missing memory cache file: {memory_cache_file}")
     with memory_cache_file.open("rb") as handle:
         agent.memory_system.memories = pickle.load(handle)
-    if retriever_cache_file.exists() and retriever_embeddings_file.exists():
+    if args.retrieval_mode == "bm25":
+        agent.memory_system.retriever = build_bm25_retriever_from_memories(
+            agent.memory_system.memories
+        )
+    elif retriever_cache_file.exists() and retriever_embeddings_file.exists():
         agent.memory_system.retriever = agent.memory_system.retriever.load(
             str(retriever_cache_file), str(retriever_embeddings_file)
         )
@@ -169,8 +191,11 @@ def evaluate_robust_sample(
     sample: Any,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    from amem.utils import calculate_metrics
+    from amem.llm_text_parsers import parse_plain_text_answer
+
     random.seed(args.seed + construction_run * 100_000 + qa_run * 1000 + sample_idx)
-    cache_dir = construction_cache_dir(args.cache_root, args.experiment_id, construction_run)
+    cache_dir = construction_cache_dir(args.cache_root, args.cache_experiment_id, construction_run)
     agent = load_robust_agent_from_cache(cache_dir, sample_idx, args)
     eligible_qas = [qa for qa in sample.qa if int(qa.category) in [1, 2, 3, 4, 5]]
     if args.qa_limit is not None:
@@ -245,7 +270,9 @@ def evaluate_robust_run(
             for future in as_completed(futures):
                 sample_outputs.append(future.result())
 
-    merged = merge_sample_outputs(sample_outputs)
+    from amem.utils import aggregate_metrics
+
+    merged = merge_robust_sample_outputs(sample_outputs)
     return {
         "construction_run": construction_run,
         "qa_run": qa_run,
@@ -253,10 +280,11 @@ def evaluate_robust_run(
         "dataset": str(args.dataset),
         "memory_layer": "robust",
         "source_construction_cache_dir": str(
-            construction_cache_dir(args.cache_root, args.experiment_id, construction_run)
+            construction_cache_dir(args.cache_root, args.cache_experiment_id, construction_run)
         ),
         "backend": args.backend,
         "retrieve_k": args.retrieve_k,
+        "retrieval_mode": args.retrieval_mode,
         "rerank_mode": args.rerank_mode,
         "rerank_model": args.rerank_model if args.rerank_mode != "off" else None,
         "rerank_top_n": args.rerank_top_n if args.rerank_mode != "off" else None,
@@ -392,10 +420,13 @@ def evaluate_content_keywords(
     samples: Sequence[Any],
     args: argparse.Namespace,
 ) -> None:
+    ck = load_content_keyword_module()
+    from sentence_transformers import SentenceTransformer
+
     mode_dir = qa_mode_dir(
         args.results_root, args.experiment_id, construction_run, "content_keywords"
     )
-    cache_dir = construction_cache_dir(args.cache_root, args.experiment_id, construction_run)
+    cache_dir = construction_cache_dir(args.cache_root, args.cache_experiment_id, construction_run)
     args.memory_cache_dir = cache_dir
     ck.CONDITIONS = args.keyword_conditions
     ck._EMBEDDING_MODEL = SentenceTransformer(args.embedding_model)
@@ -451,6 +482,7 @@ def evaluate_robust(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate QA from saved A-MEM caches")
     parser.add_argument("--experiment-id", required=True)
+    parser.add_argument("--cache-experiment-id", default=None)
     parser.add_argument("--dataset", type=Path, default=Path("data/locomo10.json"))
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS_ROOT)
@@ -471,6 +503,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260701)
     parser.add_argument("--embedding-model", default="all-MiniLM-L6-v2")
+    parser.add_argument("--retrieval-mode", choices=["embedding", "bm25"], default="embedding")
     parser.add_argument("--rerank-mode", choices=["off", "cross_encoder"], default="off")
     parser.add_argument("--rerank-model", default=DEFAULT_CROSS_ENCODER_MODEL)
     parser.add_argument("--rerank-top-n", type=int, default=50)
@@ -485,6 +518,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.experiment_id = validate_experiment_id(args.experiment_id)
+    args.cache_experiment_id = validate_experiment_id(args.cache_experiment_id or args.experiment_id)
     args.dataset = repo_path(args.dataset)
     args.cache_root = repo_path(args.cache_root)
     args.results_root = repo_path(args.results_root)
@@ -515,6 +549,7 @@ def main() -> None:
         results_dir,
         {
             "experiment_id": args.experiment_id,
+            "cache_experiment_id": args.cache_experiment_id,
             "stage": "qa_evaluation",
             "dataset": str(args.dataset),
             "backend": args.backend,
@@ -522,6 +557,7 @@ def main() -> None:
             "qa_mode": args.qa_mode,
             "qa_runs": args.qa_runs,
             "keyword_conditions": list(args.keyword_conditions),
+            "retrieval_mode": args.retrieval_mode,
             "rerank_mode": args.rerank_mode,
             "rerank_model": args.rerank_model if args.rerank_mode != "off" else None,
             "rerank_top_n": args.rerank_top_n if args.rerank_mode != "off" else None,
@@ -533,12 +569,12 @@ def main() -> None:
     construction_runs = (
         list(range(args.construction_runs))
         if args.construction_runs is not None
-        else discover_construction_runs(args.cache_root, args.experiment_id)
+        else discover_construction_runs(args.cache_root, args.cache_experiment_id)
     )
     if not construction_runs:
         raise FileNotFoundError(
             f"No construction_run_* directories found under "
-            f"{args.cache_root / args.experiment_id}"
+            f"{args.cache_root / args.cache_experiment_id}"
         )
 
     logging.info("Loading dataset: %s", args.dataset)

@@ -61,12 +61,16 @@ def test_two_stage_wrapper_forwards_reranker_flags_to_evaluation_only():
     wrapper = (ROOT / "scripts" / "run_experiment.sh").read_text(encoding="utf-8")
 
     assert 'rerank_mode="off"' in wrapper
+    assert 'retrieval_mode="embedding"' in wrapper
+    assert "--retrieval-mode" in wrapper
     assert "--rerank-mode" in wrapper
     assert "--rerank-model" in wrapper
     assert "--rerank-top-n" in wrapper
     assert "--rerank-batch-size" in wrapper
     build_section = wrapper.split("build_cmd=(", 1)[1].split("eval_cmd=(", 1)[0]
     eval_section = wrapper.split("eval_cmd=(", 1)[1].split(")", 1)[0]
+    assert "--retrieval-mode" not in build_section
+    assert "--retrieval-mode" in eval_section
     assert "--rerank-mode" not in build_section
     assert "--rerank-mode" in eval_section
 
@@ -93,6 +97,8 @@ def test_baseline_doc_records_core_retrieval_comparison_terms():
         "content_keywords",
         "keyword_pruning_mode",
         "cross_encoder",
+        "bm25",
+        "retrieval_mode",
         "ollama_llama3.2-1b_none_rerank_k10",
     ]
     for term in required_terms:

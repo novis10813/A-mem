@@ -129,11 +129,52 @@ uv run python scripts/evaluate_memories.py \
 
 這些欄位用來檢查 reranker 是否真的改變了 retrieval order，也能分析「第一階段有沒有召回正確記憶」與「第二階段是否把正確記憶往前排」。
 
-## 6. 模組邊界
+## 6. BM25 first-stage retrieval 設計
+
+BM25 是 robust QA evaluation 的可選第一階段 retriever，不屬於 memory construction，也不改 cache schema。
+
+資料流：
+
+```text
+existing memory cache
+  -> 從 memory notes 即時建立 BM25 index
+  -> LLM 產生 query keywords
+  -> BM25.search(query_keywords, retrieve_k)
+  -> render robust raw_context
+  -> LLM answer prompt
+```
+
+CLI 範例：
+
+```bash
+uv run python scripts/evaluate_memories.py \
+  --experiment-id ollama_llama3.2-1b_none_bm25_k10 \
+  --cache-experiment-id ollama_llama3.2-1b_none_base_cache \
+  --dataset data/locomo10.json \
+  --backend ollama \
+  --model llama3.2:1b \
+  --qa-mode robust \
+  --qa-runs 30 \
+  --retrieve-k 10 \
+  --retrieval-mode bm25 \
+  --rerank-mode off \
+  --resume
+```
+
+語義：
+
+- `retrieval_mode=embedding` 是既有 robust baseline。
+- `retrieval_mode=bm25` 從同一份 memory cache 建 BM25 index，適合固定 cache 比較 retrieval effect。
+- `cache_experiment_id` 指向讀取 cache 的 experiment；`experiment_id` 指向本次 evaluation result。
+- 主比較建議使用 `--rerank-mode off`，避免第一階段 retrieval 和第二階段 reranking 效果混在一起。
+- 若同時啟用 CrossEncoder，candidate pool 會先由 `retrieval_mode` 產生，再交給 CrossEncoder 重排。
+- `retrieval_info.retrieval_mode` 會記錄 `embedding` 或 `bm25`。
+
+## 7. 模組邊界
 
 - `src/amem/reranking.py`：reranker abstraction、CrossEncoder implementation、factory。
-- `src/amem/memory_layer_robust.py`：robust memory system 的 candidate selection、reranker integration、retrieval metadata。
+- `src/amem/memory_layer_robust.py`：robust memory system 的 candidate selection、BM25 retriever、reranker integration、retrieval metadata。
 - `test_advanced_robust.py`：legacy robust evaluator；保留 reranker flags 以維持單檔入口可用。
-- `scripts/evaluate_memories.py`：two-stage QA evaluation；只在 evaluation 階段載入 reranker。
+- `scripts/evaluate_memories.py`：two-stage QA evaluation；只在 evaluation 階段切換 retriever 或載入 reranker。
 - `scripts/build_memories.py`：不應因 reranker 改動；reranker 不屬於 memory construction。
-- `scripts/run_experiment.sh`：wrapper；reranker flags 只傳給 evaluate command。
+- `scripts/run_experiment.sh`：wrapper；retrieval/reranker flags 只傳給 evaluate command。

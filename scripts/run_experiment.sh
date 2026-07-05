@@ -18,6 +18,7 @@ Options:
   --keyword-pruning-mode none|simple|nltk
   --keyword-conditions LIST
   --retrieve-k N
+  --retrieval-mode embedding|bm25
   --rerank-mode off|cross_encoder
   --rerank-model NAME
   --rerank-top-n N
@@ -48,6 +49,7 @@ qa_mode="content_keywords"
 keyword_pruning_mode="nltk"
 keyword_conditions="none,nltk"
 retrieve_k="10"
+retrieval_mode="embedding"
 rerank_mode="off"
 rerank_model="cross-encoder/ms-marco-MiniLM-L6-v2"
 rerank_top_n="50"
@@ -75,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --keyword-pruning-mode) keyword_pruning_mode="$2"; shift 2 ;;
     --keyword-conditions) keyword_conditions="$2"; shift 2 ;;
     --retrieve-k|--retrieve_k) retrieve_k="$2"; shift 2 ;;
+    --retrieval-mode) retrieval_mode="$2"; shift 2 ;;
     --rerank-mode) rerank_mode="$2"; shift 2 ;;
     --rerank-model) rerank_model="$2"; shift 2 ;;
     --rerank-top-n) rerank_top_n="$2"; shift 2 ;;
@@ -134,6 +137,7 @@ eval_cmd=(
   --qa-mode "$qa_mode"
   --keyword-conditions "$keyword_conditions"
   --retrieve-k "$retrieve_k"
+  --retrieval-mode "$retrieval_mode"
   --rerank-mode "$rerank_mode"
   --rerank-model "$rerank_model"
   --rerank-top-n "$rerank_top_n"

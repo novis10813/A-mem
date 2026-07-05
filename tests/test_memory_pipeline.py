@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from amem.memory_layer_robust import RobustAgenticMemorySystem
+from amem.memory_layer_robust import BM25MemoryRetriever, RobustAgenticMemorySystem
 from amem.memory_pipeline import (
     MemoryProcessingPipeline,
     PipelineHook,
@@ -238,6 +238,7 @@ def test_find_related_memories_uses_rerank_candidate_pool_then_final_k():
         "final_indices": [2, 0],
         "rerank_scores": [4.0, 3.0],
         "rerank_mode": "test",
+        "retrieval_mode": "embedding",
     }
 
 
@@ -270,6 +271,57 @@ def test_find_related_memories_keeps_existing_k_when_reranker_disabled():
     assert "memory content: content 0" not in context
     assert system.last_retrieval_info["final_indices"] == [2, 1]
     assert system.last_retrieval_info["rerank_mode"] == "off"
+    assert system.last_retrieval_info["retrieval_mode"] == "embedding"
+
+
+def test_bm25_memory_retriever_ranks_lexical_matches_and_preserves_ties():
+    retriever = BM25MemoryRetriever(
+        [
+            "garden cooking",
+            "museum tickets",
+            "museum cafe",
+        ]
+    )
+
+    assert retriever.search("museum", 3) == [1, 2, 0]
+
+
+def test_find_related_memories_records_bm25_retrieval_mode():
+    memories = {
+        "note-0": SimpleNamespace(
+            id="note-0",
+            timestamp="2026-01-01",
+            content="Avery bought museum tickets",
+            context="museum plans",
+            keywords=["tickets"],
+            tags=[],
+            links=[],
+        ),
+        "note-1": SimpleNamespace(
+            id="note-1",
+            timestamp="2026-01-02",
+            content="Avery cooked dinner",
+            context="home dinner",
+            keywords=["cooking"],
+            tags=[],
+            links=[],
+        ),
+    }
+    system = RobustAgenticMemorySystem.__new__(RobustAgenticMemorySystem)
+    system.memories = memories
+    system.retriever = BM25MemoryRetriever(["museum tickets", "home cooking"])
+    system.reranker = None
+    system.rerank_top_n = None
+    system.retrieval_mode = "bm25"
+    system.last_retrieval_info = {}
+
+    context = RobustAgenticMemorySystem.find_related_memories_raw(system, "museum", k=1)
+
+    assert "memory content: Avery bought museum tickets" in context
+    assert "memory content: Avery cooked dinner" not in context
+    assert system.last_retrieval_info["candidate_indices"] == [0]
+    assert system.last_retrieval_info["final_indices"] == [0]
+    assert system.last_retrieval_info["retrieval_mode"] == "bm25"
 
 
 def test_pipeline_timing_hook_records_stage_summary():

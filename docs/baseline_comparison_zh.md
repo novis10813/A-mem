@@ -12,6 +12,7 @@
 | Content+keywords fixed-cache | `scripts/evaluate_memories.py --qa-mode content_keywords` | 不重建，讀既有 cache | `content + transformed keywords` | 只含 `timestamp/content/keywords` | 無 | 同一份 memory notes 上，keyword transform 對 retrieval/QA 的影響 |
 | Content+keyword pruning legacy | `scripts/run_content_keyword_pruning_experiment.py` | 不重建，讀 legacy cache | `content + transformed keywords` | 只含 `timestamp/content/keywords` | 無 | 舊版 fixed-cache pruning 分析 |
 | Content+keyword rebuild legacy | `scripts/run_content_keyword_rebuild_experiment.py` | 每個 pruning condition 重建 memories | `content + keywords` | 只含 `timestamp/content/keywords` | 無 | construction + retrieval + QA 的 system-level pruning 效果 |
+| Robust BM25 retrieval | `scripts/evaluate_memories.py --qa-mode robust --retrieval-mode bm25` | 不重建，讀既有 cache | BM25 index 使用 robust retrieval document | 同 robust baseline | 預設無 | 固定 cache 下比較 BM25 first-stage retrieval 與 embedding retrieval |
 | Robust CrossEncoder rerank | `scripts/evaluate_memories.py --qa-mode robust --rerank-mode cross_encoder` | 不因 reranker 重建 | 第一階段同 robust similarity candidate pool | 最終 top `retrieve_k` robust context | CrossEncoder | 第二階段 reranking 是否改善 robust retrieval 排序 |
 
 ## 2. 不要混淆的設定
@@ -108,6 +109,25 @@ artifacts/logs/ollama_llama3.2-1b_none_rerank_k10/
 ```
 
 這個比較主要回答：第二階段 reranker 是否改善 final memory ordering。
+
+### BM25 first-stage retrieval 效果
+
+固定同一份 cache，比較：
+
+```bash
+--qa-mode robust --retrieval-mode embedding --rerank-mode off --retrieve-k 10
+--qa-mode robust --retrieval-mode bm25 --rerank-mode off --retrieve-k 10
+```
+
+如果要讓兩個 result experiment 共用同一份 cache，用：
+
+```bash
+--cache-experiment-id ollama_llama3.2-1b_none_base_cache
+```
+
+這個比較主要回答：第一階段 retrieval 從 embedding 換成 BM25 是否改善 QA。
+
+結果 metadata 會記錄 `retrieval_mode`，值為 `embedding` 或 `bm25`。
 
 ### Keyword pruning 效果
 
