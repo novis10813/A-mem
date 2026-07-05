@@ -102,6 +102,35 @@ Run the embedding-field ablation after memory caches have been created:
 bash run_ablation_core7_k5.sh
 ```
 
+Run the preferred two-stage pipeline from a YAML config:
+```yaml
+experiment_id: ollama_llama3.2-1b_nltk_k10
+dataset: data/locomo10.json
+backend:
+  name: ollama
+  model: llama3.2:1b
+construction:
+  runs: 1
+  keyword_pruning_mode: nltk
+  max_workers: 10
+evaluation:
+  qa_mode: both
+  qa_runs: 30
+  keyword_conditions: [none, nltk]
+  retrieve_k: 10
+  retrieval_mode: embedding
+  rerank:
+    mode: off
+run:
+  resume: true
+```
+
+```bash
+uv run python scripts/run_experiment.py --config experiments/ollama_llama3.2-1b_nltk_k10.yaml
+```
+
+The config-driven path writes schema-v2 manifests with dataset hashes, git metadata, construction/evaluation settings, and runtime paths. The older shell wrapper and direct build/evaluate CLI entrypoints remain available for manual runs.
+
 Option 2: Using venv (Python virtual environment)
 ```bash
 # Create and activate virtual environment

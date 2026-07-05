@@ -7,6 +7,7 @@ from amem.memory_pipeline import (
     PipelineTimingHook,
     merge_timing_summaries,
 )
+from amem.retrieval_pipeline import BM25Reranker, EmbeddingCandidateGenerator, RetrievalPipeline
 
 
 class RecordingHook(PipelineHook):
@@ -230,16 +231,18 @@ def test_find_related_memories_uses_rerank_candidate_pool_then_final_k():
     assert "memory content: content 2" in context
     assert "memory content: content 0" in context
     assert "memory content: content 1" not in context
-    assert system.last_retrieval_info == {
-        "similarity_query": "similarity keywords",
-        "rerank_query": "original question",
-        "candidate_k": 4,
-        "candidate_indices": [0, 1, 2, 3],
-        "final_indices": [2, 0],
-        "rerank_scores": [4.0, 3.0],
-        "rerank_mode": "test",
-        "retrieval_mode": "embedding",
-    }
+    assert system.last_retrieval_info["schema_version"] == 3
+    assert [stage["type"] for stage in system.last_retrieval_info["stages"]] == [
+        "embedding",
+        "cross_encoder",
+    ]
+    assert [item["memory_index"] for item in system.last_retrieval_info["candidates"]] == [2, 0]
+    assert [item["memory_index"] for item in system.last_retrieval_info["selected"]] == [2, 0]
+    assert [item["scores"]["cross_encoder_rerank"] for item in system.last_retrieval_info["selected"]] == [
+        4.0,
+        3.0,
+    ]
+    assert system.last_retrieval_info["original_question"] == "original question"
 
 
 def test_find_related_memories_keeps_existing_k_when_reranker_disabled():
@@ -269,9 +272,9 @@ def test_find_related_memories_keeps_existing_k_when_reranker_disabled():
     assert "memory content: content 2" in context
     assert "memory content: content 1" in context
     assert "memory content: content 0" not in context
-    assert system.last_retrieval_info["final_indices"] == [2, 1]
-    assert system.last_retrieval_info["rerank_mode"] == "off"
-    assert system.last_retrieval_info["retrieval_mode"] == "embedding"
+    assert system.last_retrieval_info["schema_version"] == 3
+    assert [item["memory_index"] for item in system.last_retrieval_info["selected"]] == [2, 1]
+    assert system.last_retrieval_info["stages"][0]["type"] == "embedding"
 
 
 def test_bm25_memory_retriever_ranks_lexical_matches_and_preserves_ties():
@@ -319,9 +322,58 @@ def test_find_related_memories_records_bm25_retrieval_mode():
 
     assert "memory content: Avery bought museum tickets" in context
     assert "memory content: Avery cooked dinner" not in context
-    assert system.last_retrieval_info["candidate_indices"] == [0]
-    assert system.last_retrieval_info["final_indices"] == [0]
-    assert system.last_retrieval_info["retrieval_mode"] == "bm25"
+    assert system.last_retrieval_info["stages"][0]["type"] == "bm25"
+    assert [item["memory_index"] for item in system.last_retrieval_info["selected"]] == [0]
+    assert system.last_retrieval_info["selected"][0]["source_stage"] == "bm25_candidates"
+
+
+def test_find_related_memories_uses_configured_pipeline_order_for_context():
+    memories = {
+        f"note-{idx}": SimpleNamespace(
+            id=f"note-{idx}",
+            timestamp=f"2026-01-0{idx}",
+            content=f"content {idx}",
+            context=f"context {idx}",
+            keywords=[f"keyword-{idx}"],
+            tags=[],
+            links=[],
+        )
+        for idx in range(3)
+    }
+    retriever = SearchingRetriever([0, 1, 2])
+    system = RobustAgenticMemorySystem.__new__(RobustAgenticMemorySystem)
+    system.memories = memories
+    system.retriever = retriever
+    system.reranker = None
+    system.rerank_top_n = None
+    system.retrieval_mode = "embedding"
+    system.last_retrieval_info = {}
+    memory_list = list(memories.values())
+    system.retrieval_pipeline = RetrievalPipeline(
+        final_k=2,
+        stages=[
+            EmbeddingCandidateGenerator(
+                top_k=3,
+                retriever=retriever,
+                memories=memory_list,
+                memory_text=RobustAgenticMemorySystem._memory_rerank_text.__get__(system),
+            ),
+            BM25Reranker(top_k=2),
+        ],
+    )
+
+    context = RobustAgenticMemorySystem.find_related_memories_raw(
+        system,
+        "content",
+        k=2,
+        rerank_query="keyword-2",
+    )
+
+    assert context.index("memory content: content 2") < context.index("memory content: content 0")
+    assert [stage["type"] for stage in system.last_retrieval_info["stages"]] == [
+        "embedding",
+        "bm25_rerank",
+    ]
 
 
 def test_pipeline_timing_hook_records_stage_summary():

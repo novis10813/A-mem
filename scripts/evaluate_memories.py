@@ -26,9 +26,12 @@ for path in (SRC_ROOT, REPO_ROOT, SCRIPTS_DIR):
 from experiment_common import (  # noqa: E402
     DEFAULT_CACHE_ROOT,
     DEFAULT_RESULTS_ROOT,
+    build_manifest_payload,
     construction_cache_dir,
     content_keywords_complete,
     experiment_results_dir,
+    experiment_cache_dir,
+    load_manifest,
     qa_mode_dir,
     qa_run_dir,
     repo_path,
@@ -37,12 +40,22 @@ from experiment_common import (  # noqa: E402
     validate_experiment_id,
     write_manifest,
 )
+from experiment_config import evaluate_args_from_config, load_experiment_config  # noqa: E402
 from amem.load_dataset import load_locomo_dataset  # noqa: E402
 from amem.memory_layer_robust import (  # noqa: E402
     RobustLLMController,
     build_bm25_retriever_from_memories,
+    robust_retrieval_document,
 )
 from amem.reranking import DEFAULT_CROSS_ENCODER_MODEL, build_reranker  # noqa: E402
+from amem.retrieval_pipeline import (  # noqa: E402
+    BM25CandidateGenerator,
+    BM25Reranker,
+    CrossEncoderRerankerStage,
+    EmbeddingCandidateGenerator,
+    LimitStage,
+    RetrievalPipeline,
+)
 
 
 METRICS = ("f1", "bleu1")
@@ -150,7 +163,6 @@ def load_robust_agent_from_cache(
     args: argparse.Namespace,
 ) -> Any:
     RobustAdvancedMemAgent = load_robust_agent_class()
-    reranker = build_reranker(args.rerank_mode, args.rerank_model, args.rerank_batch_size)
     agent = RobustAdvancedMemAgent(
         args.model,
         args.backend,
@@ -158,9 +170,6 @@ def load_robust_agent_from_cache(
         args.temperature_c5,
         args.sglang_host,
         args.sglang_port,
-        reranker=reranker,
-        rerank_top_n=args.rerank_top_n,
-        retrieval_mode=args.retrieval_mode,
     )
     memory_cache_file = cache_dir / f"memory_cache_sample_{sample_idx}.pkl"
     retriever_cache_file = cache_dir / f"retriever_cache_sample_{sample_idx}.pkl"
@@ -169,7 +178,7 @@ def load_robust_agent_from_cache(
         raise FileNotFoundError(f"Missing memory cache file: {memory_cache_file}")
     with memory_cache_file.open("rb") as handle:
         agent.memory_system.memories = pickle.load(handle)
-    if args.retrieval_mode == "bm25":
+    if getattr(args, "retrieval_mode", "embedding") == "bm25":
         agent.memory_system.retriever = build_bm25_retriever_from_memories(
             agent.memory_system.memories
         )
@@ -181,7 +190,61 @@ def load_robust_agent_from_cache(
         agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
             agent.memory_system.memories, args.embedding_model
         )
+    if getattr(args, "retrieval_pipeline", None) is not None:
+        agent.memory_system.retrieval_pipeline = build_retrieval_pipeline(
+            args.retrieval_pipeline,
+            agent.memory_system,
+        )
     return agent
+
+
+def build_retrieval_pipeline(config: Any, memory_system: Any) -> RetrievalPipeline:
+    memories = list(memory_system.memories.values())
+    stages = []
+    for stage in config.stages:
+        if stage.type == "embedding":
+            stages.append(
+                EmbeddingCandidateGenerator(
+                    name=stage.name,
+                    top_k=stage.top_k,
+                    query=stage.query,
+                    retriever=memory_system.retriever,
+                    memories=memories,
+                    memory_text=memory_system._memory_rerank_text,
+                )
+            )
+        elif stage.type == "bm25":
+            stages.append(
+                BM25CandidateGenerator(
+                    name=stage.name,
+                    top_k=stage.top_k,
+                    query=stage.query,
+                    memories=memories,
+                    memory_text=memory_system._memory_rerank_text,
+                    document_text=robust_retrieval_document,
+                )
+            )
+        elif stage.type == "bm25_rerank":
+            stages.append(BM25Reranker(name=stage.name, top_k=stage.top_k, query=stage.query))
+        elif stage.type == "cross_encoder":
+            reranker = build_reranker(
+                "cross_encoder",
+                stage.model or DEFAULT_CROSS_ENCODER_MODEL,
+                stage.batch_size,
+            )
+            stages.append(
+                CrossEncoderRerankerStage(
+                    name=stage.name,
+                    top_k=stage.top_k,
+                    query=stage.query,
+                    reranker=reranker,
+                )
+            )
+        elif stage.type == "limit":
+            stages.append(LimitStage(name=stage.name, top_k=stage.top_k))
+        else:
+            raise ValueError(f"Unsupported retrieval pipeline stage: {stage.type}")
+    return RetrievalPipeline(stages=stages, final_k=config.final_k)
 
 
 def evaluate_robust_sample(
@@ -283,12 +346,7 @@ def evaluate_robust_run(
             construction_cache_dir(args.cache_root, args.cache_experiment_id, construction_run)
         ),
         "backend": args.backend,
-        "retrieve_k": args.retrieve_k,
-        "retrieval_mode": args.retrieval_mode,
-        "rerank_mode": args.rerank_mode,
-        "rerank_model": args.rerank_model if args.rerank_mode != "off" else None,
-        "rerank_top_n": args.rerank_top_n if args.rerank_mode != "off" else None,
-        "rerank_batch_size": args.rerank_batch_size if args.rerank_mode != "off" else None,
+        "retrieval_pipeline": retrieval_pipeline_to_json(getattr(args, "retrieval_pipeline", None)),
         "temperature_c5": args.temperature_c5,
         "total_questions": merged["total_questions"],
         "category_distribution": dict(merged["category_counts"]),
@@ -307,6 +365,29 @@ def write_robust_run(
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "results.json").open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
+
+
+def retrieval_pipeline_to_json(config: Any) -> dict[str, Any] | None:
+    if config is None:
+        return None
+    return {
+        "final_k": config.final_k,
+        "stages": [
+            {
+                "type": stage.type,
+                "name": stage.name,
+                "top_k": stage.top_k,
+                "query": stage.query,
+                **({"model": stage.model} if stage.model else {}),
+                **(
+                    {"batch_size": stage.batch_size}
+                    if stage.type == "cross_encoder"
+                    else {}
+                ),
+            }
+            for stage in config.stages
+        ],
+    }
 
 
 def flatten_metric_rows(
@@ -481,7 +562,8 @@ def evaluate_robust(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate QA from saved A-MEM caches")
-    parser.add_argument("--experiment-id", required=True)
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--experiment-id", required=False)
     parser.add_argument("--cache-experiment-id", default=None)
     parser.add_argument("--dataset", type=Path, default=Path("data/locomo10.json"))
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
@@ -503,26 +585,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260701)
     parser.add_argument("--embedding-model", default="all-MiniLM-L6-v2")
-    parser.add_argument("--retrieval-mode", choices=["embedding", "bm25"], default="embedding")
-    parser.add_argument("--rerank-mode", choices=["off", "cross_encoder"], default="off")
-    parser.add_argument("--rerank-model", default=DEFAULT_CROSS_ENCODER_MODEL)
-    parser.add_argument("--rerank-top-n", type=int, default=50)
-    parser.add_argument("--rerank-batch-size", type=int, default=32)
     parser.add_argument("--sglang_host", default="http://localhost")
     parser.add_argument("--sglang_port", type=int, default=30000)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--log-level", default="INFO")
-    return parser.parse_args()
+    parser.add_argument("--log-level", default=None)
+    args = parser.parse_args()
+    if args.config:
+        config_args = evaluate_args_from_config(load_experiment_config(args.config))
+        if args.resume:
+            config_args.resume = True
+        if args.log_level:
+            config_args.log_level = args.log_level
+        return config_args
+    args.log_level = args.log_level or "INFO"
+    args.retrieval_pipeline = None
+    args.retrieval_mode = "embedding"
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    if not args.experiment_id:
+        raise ValueError("--experiment-id is required unless --config is provided")
     args.experiment_id = validate_experiment_id(args.experiment_id)
     args.cache_experiment_id = validate_experiment_id(args.cache_experiment_id or args.experiment_id)
     args.dataset = repo_path(args.dataset)
     args.cache_root = repo_path(args.cache_root)
     args.results_root = repo_path(args.results_root)
-    args.keyword_conditions = parse_conditions(args.keyword_conditions)
+    if isinstance(args.keyword_conditions, str):
+        args.keyword_conditions = parse_conditions(args.keyword_conditions)
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
@@ -534,36 +625,58 @@ def main() -> None:
         raise ValueError("--ratio must be between 0.0 and 1.0")
     if args.retrieve_k < 1:
         raise ValueError("--retrieve-k must be >= 1")
-    if args.rerank_top_n < 1:
-        raise ValueError("--rerank-top-n must be >= 1")
-    if args.rerank_batch_size < 1:
-        raise ValueError("--rerank-batch-size must be >= 1")
-    if args.rerank_mode != "off" and args.rerank_top_n < args.retrieve_k:
-        raise ValueError("--rerank-top-n must be >= --retrieve-k when reranking is enabled")
     if args.max_workers < 1:
         raise ValueError("--max-workers must be >= 1")
 
     results_dir = experiment_results_dir(args.results_root, args.experiment_id)
     results_dir.mkdir(parents=True, exist_ok=True)
+    source_cache_manifest = load_manifest(
+        experiment_cache_dir(args.cache_root, args.cache_experiment_id)
+    )
     write_manifest(
         results_dir,
-        {
-            "experiment_id": args.experiment_id,
-            "cache_experiment_id": args.cache_experiment_id,
-            "stage": "qa_evaluation",
-            "dataset": str(args.dataset),
-            "backend": args.backend,
-            "model": args.model,
-            "qa_mode": args.qa_mode,
-            "qa_runs": args.qa_runs,
-            "keyword_conditions": list(args.keyword_conditions),
-            "retrieval_mode": args.retrieval_mode,
-            "rerank_mode": args.rerank_mode,
-            "rerank_model": args.rerank_model if args.rerank_mode != "off" else None,
-            "rerank_top_n": args.rerank_top_n if args.rerank_mode != "off" else None,
-            "rerank_batch_size": args.rerank_batch_size if args.rerank_mode != "off" else None,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        },
+        build_manifest_payload(
+            experiment_id=args.experiment_id,
+            cache_experiment_id=args.cache_experiment_id,
+            stage="qa_evaluation",
+            dataset=args.dataset,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            config_source=getattr(args, "config_source", None),
+            construction={
+                "runs": args.construction_runs,
+                "embedding_model": args.embedding_model,
+            },
+            evaluation={
+                "qa_mode": args.qa_mode,
+                "qa_runs": args.qa_runs,
+                "keyword_conditions": list(args.keyword_conditions),
+                "retrieval_pipeline": retrieval_pipeline_to_json(
+                    getattr(args, "retrieval_pipeline", None)
+                ),
+                "temperature_c5": args.temperature_c5,
+                "max_keywords": args.max_keywords,
+                "seed": args.seed,
+            },
+            runtime={
+                "backend": {
+                    "name": args.backend,
+                    "model": args.model,
+                    "sglang_host": args.sglang_host,
+                    "sglang_port": args.sglang_port,
+                },
+                "limits": {
+                    "ratio": args.ratio,
+                    "sample_limit": args.sample_limit,
+                    "qa_limit": args.qa_limit,
+                },
+                "run": {
+                    "resume": args.resume,
+                    "log_level": args.log_level,
+                    "max_workers": args.max_workers,
+                },
+            },
+            source_cache_manifest=source_cache_manifest,
+        ),
     )
 
     construction_runs = (

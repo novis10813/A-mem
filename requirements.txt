@@ -21,6 +21,7 @@ tqdm
 pandas
 pathlib
 python-dotenv
+PyYAML
 
 # Testing
 pytest

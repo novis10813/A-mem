@@ -92,13 +92,14 @@ def test_baseline_doc_records_core_retrieval_comparison_terms():
     )
 
     required_terms = [
-        "retrieve_k",
-        "rerank_top_n",
+        "final_k",
+        "top_k",
+        "retrieval_pipeline",
         "content_keywords",
         "keyword_pruning_mode",
         "cross_encoder",
         "bm25",
-        "retrieval_mode",
+        "cache_experiment_id",
         "ollama_llama3.2-1b_none_rerank_k10",
     ]
     for term in required_terms:

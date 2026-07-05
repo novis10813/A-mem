@@ -23,6 +23,7 @@ for path in (SRC_ROOT, REPO_ROOT, SCRIPTS_DIR):
 
 from experiment_common import (  # noqa: E402
     DEFAULT_CACHE_ROOT,
+    build_manifest_payload,
     construction_cache_dir,
     construction_complete,
     expected_cache_files,
@@ -32,6 +33,7 @@ from experiment_common import (  # noqa: E402
     write_json,
     write_manifest,
 )
+from experiment_config import build_args_from_config, load_experiment_config  # noqa: E402
 from amem.llm_text_parsers import set_keyword_pruning_mode  # noqa: E402
 from amem.load_dataset import load_locomo_dataset  # noqa: E402
 from amem.memory_layer_robust import RobustAgenticMemorySystem  # noqa: E402
@@ -171,7 +173,8 @@ def build_construction_run(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build reusable A-MEM memory caches")
-    parser.add_argument("--experiment-id", required=True)
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--experiment-id", required=False)
     parser.add_argument("--dataset", type=Path, default=Path("data/locomo10.json"))
     parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT)
     parser.add_argument("--backend", default="ollama")
@@ -188,12 +191,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sglang_host", default="http://localhost")
     parser.add_argument("--sglang_port", type=int, default=30000)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--log-level", default="INFO")
-    return parser.parse_args()
+    parser.add_argument("--log-level", default=None)
+    args = parser.parse_args()
+    if args.config:
+        config_args = build_args_from_config(load_experiment_config(args.config))
+        if args.resume:
+            config_args.resume = True
+        if args.log_level:
+            config_args.log_level = args.log_level
+        return config_args
+    args.log_level = args.log_level or "INFO"
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    if not args.experiment_id:
+        raise ValueError("--experiment-id is required unless --config is provided")
     args.experiment_id = validate_experiment_id(args.experiment_id)
     args.dataset = repo_path(args.dataset)
     args.cache_root = repo_path(args.cache_root)
@@ -214,16 +228,36 @@ def main() -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     write_manifest(
         cache_dir,
-        {
-            "experiment_id": args.experiment_id,
-            "stage": "memory_construction",
-            "dataset": str(args.dataset),
-            "backend": args.backend,
-            "model": args.model,
-            "construction_runs": args.construction_runs,
-            "keyword_pruning_mode": args.keyword_pruning_mode,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        },
+        build_manifest_payload(
+            experiment_id=args.experiment_id,
+            stage="memory_construction",
+            dataset=args.dataset,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            config_source=getattr(args, "config_source", None),
+            construction={
+                "runs": args.construction_runs,
+                "keyword_pruning_mode": args.keyword_pruning_mode,
+                "embedding_model": args.embedding_model,
+                "max_workers": args.max_workers,
+            },
+            runtime={
+                "backend": {
+                    "name": args.backend,
+                    "model": args.model,
+                    "sglang_host": args.sglang_host,
+                    "sglang_port": args.sglang_port,
+                },
+                "limits": {
+                    "ratio": args.ratio,
+                    "sample_limit": args.sample_limit,
+                    "turn_limit": args.turn_limit,
+                },
+                "run": {
+                    "resume": args.resume,
+                    "log_level": args.log_level,
+                },
+            },
+        ),
     )
 
     logging.info("Loading dataset: %s", args.dataset)

@@ -6,11 +6,14 @@ import json
 import re
 import csv
 import statistics
+import subprocess
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
+ARTIFACT_SCHEMA_VERSION = 2
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = Path("artifacts")
 DEFAULT_CACHE_ROOT = ARTIFACTS_ROOT / "caches"
@@ -104,6 +107,77 @@ def write_manifest(root: Path, payload: Mapping[str, Any]) -> None:
 def load_manifest(root: Path) -> dict[str, Any]:
     path = root / "manifest.json"
     return read_json(path) if path.exists() else {}
+
+
+def sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def git_metadata() -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        status = subprocess.check_output(
+            ["git", "status", "--short"],
+            cwd=REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return {"git_commit": commit, "git_dirty": bool(status.strip())}
+    except (OSError, subprocess.CalledProcessError):
+        return {"git_commit": None, "git_dirty": None}
+
+
+def compact_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def build_manifest_payload(
+    *,
+    experiment_id: str,
+    stage: str,
+    dataset: Path,
+    created_at: str,
+    config_source: str | None,
+    construction: Mapping[str, Any],
+    evaluation: Mapping[str, Any] | None = None,
+    runtime: Mapping[str, Any] | None = None,
+    cache_experiment_id: str | None = None,
+    source_cache_manifest: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "experiment_id": experiment_id,
+        "stage": stage,
+        "created_at": created_at,
+        "repo": git_metadata(),
+        "dataset": {
+            "path": str(dataset),
+            "sha256": sha256_file(dataset) if dataset.exists() else None,
+        },
+        "config_source": config_source,
+        "construction": compact_config(construction),
+        "evaluation": compact_config(evaluation or {}),
+        "runtime": compact_config(runtime or {}),
+    }
+    if cache_experiment_id is not None:
+        payload["cache_experiment_id"] = cache_experiment_id
+    if source_cache_manifest:
+        payload["source_cache_manifest"] = {
+            "experiment_id": source_cache_manifest.get("experiment_id"),
+            "artifact_schema_version": source_cache_manifest.get("artifact_schema_version"),
+            "dataset": source_cache_manifest.get("dataset"),
+            "construction": source_cache_manifest.get("construction"),
+        }
+    return payload
 
 
 def expected_cache_files(cache_dir: Path, sample_indices: Sequence[int]) -> list[Path]:

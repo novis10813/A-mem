@@ -10,6 +10,35 @@ DEFAULT_CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
 
 
 @dataclass(frozen=True)
+class RetrievalCandidate:
+    memory_index: int
+    memory_id: str
+    text: str
+    retrieval_score: float | None
+    rerank_score: float | None
+    source: str
+    rank: int
+
+    def __getitem__(self, index: int) -> int | str:
+        if index == 0:
+            return self.memory_index
+        if index == 1:
+            return self.text
+        raise IndexError(index)
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "memory_index": self.memory_index,
+            "memory_id": self.memory_id,
+            "text": self.text,
+            "retrieval_score": self.retrieval_score,
+            "rerank_score": self.rerank_score,
+            "source": self.source,
+            "rank": self.rank,
+        }
+
+
+@dataclass(frozen=True)
 class RerankedCandidate:
     index: int
     score: float
@@ -21,7 +50,7 @@ class BaseReranker(Protocol):
     def rerank(
         self,
         query: str,
-        candidates: Sequence[tuple[int, str]],
+        candidates: Sequence[RetrievalCandidate | tuple[int, str]],
         top_k: int,
     ) -> list[RerankedCandidate]:
         """Rank candidate memory texts for the query."""
@@ -44,13 +73,16 @@ class CrossEncoderReranker:
     def rerank(
         self,
         query: str,
-        candidates: Sequence[tuple[int, str]],
+        candidates: Sequence[RetrievalCandidate | tuple[int, str]],
         top_k: int,
     ) -> list[RerankedCandidate]:
         if top_k < 1 or not candidates:
             return []
 
-        pairs = [(query, text) for _, text in candidates]
+        pairs = [
+            (query, candidate.text if isinstance(candidate, RetrievalCandidate) else candidate[1])
+            for candidate in candidates
+        ]
         raw_scores = self.model.predict(
             pairs,
             batch_size=self.batch_size,
@@ -62,7 +94,14 @@ class CrossEncoderReranker:
             key=lambda item: (-item[1][1], item[0]),
         )
         return [
-            RerankedCandidate(index=int(candidate[0]), score=score)
+            RerankedCandidate(
+                index=(
+                    candidate.memory_index
+                    if isinstance(candidate, RetrievalCandidate)
+                    else int(candidate[0])
+                ),
+                score=score,
+            )
             for _, (candidate, score) in ranked[:top_k]
         ]
 
