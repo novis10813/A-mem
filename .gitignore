@@ -28,3 +28,4 @@ docs/
 docs/*
 !docs/retrieval_reranker_design_zh.md
 !docs/baseline_comparison_zh.md
+!docs/benchmark_component_usage.md

@@ -92,6 +92,9 @@ Detailed design notes:
 
 - `docs/retrieval_reranker_design_zh.md`: robust retrieval, content+keyword retrieval, and CrossEncoder reranker data flow.
 - `docs/baseline_comparison_zh.md`: baseline matrix and guidance for comparing construction, retrieval, keyword pruning, and reranking variants.
+- `docs/benchmark_component_usage.md`: how to use the normalized component
+  benchmark artifacts after the migration, plus integration principles for new
+  construction/retrieval/QA methods.
 - `docs/superpowers/specs/2026-07-07-benchmark-component-architecture-design.md`:
   component benchmark architecture for mixing construction, retrieval, QA,
   graph memory, non-graph RAG, and token usage accounting.

@@ -138,6 +138,10 @@ A-Mem caches/results. Normalized construction stores live under
 and dashboard loading; legacy pickle caches and robust result files remain
 available during the transition.
 
+For the normalized artifact schema, correct usage after this migration, token
+accounting, and integration rules for graph/non-graph methods, see
+[`docs/benchmark_component_usage.md`](docs/benchmark_component_usage.md).
+
 Option 2: Using venv (Python virtual environment)
 ```bash
 # Create and activate virtual environment
