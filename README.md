@@ -131,6 +131,13 @@ uv run python scripts/run_experiment.py --config experiments/ollama_llama3.2-1b_
 
 The config-driven path writes schema-v2 manifests with dataset hashes, git metadata, construction/evaluation settings, and runtime paths. The older shell wrapper and direct build/evaluate CLI entrypoints remain available for manual runs.
 
+The component benchmark migration also writes normalized artifacts beside legacy
+A-Mem caches/results. Normalized construction stores live under
+`construction_run_XX/normalized/`, and normalized QA rows live under
+`qa_run_XX/normalized/`. These files are intended for cross-method comparisons
+and dashboard loading; legacy pickle caches and robust result files remain
+available during the transition.
+
 Option 2: Using venv (Python virtual environment)
 ```bash
 # Create and activate virtual environment
