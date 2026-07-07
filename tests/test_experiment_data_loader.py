@@ -160,6 +160,43 @@ class TestLoadExperimentResults:
             load_experiment_results("does_not_exist_xyz", 0, 0)
 
 
+def test_load_experiment_results_prefers_normalized_results(tmp_path: Path):
+    root = tmp_path / "results"
+    run_dir = root / "exp" / "construction_run_00" / "robust" / "qa_run_00"
+    (run_dir / "normalized").mkdir(parents=True)
+    (run_dir / "results.json").write_text(
+        json.dumps({"individual_results": [{"sample_id": 0, "question": "old"}]}),
+        encoding="utf-8",
+    )
+    (run_dir / "normalized" / "results.json").write_text(
+        json.dumps(
+            {
+                "individual_results": [
+                    {
+                        "sample_id": 0,
+                        "qa_idx": 0,
+                        "question": "new",
+                        "reference": "r",
+                        "prediction": "p",
+                        "category": 1,
+                        "metrics": {"f1": 1.0},
+                        "usage": [{"total_tokens": 10, "source": "reported"}],
+                        "retrieval": {"items": []},
+                        "context": {"text": "ctx"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data = load_experiment_results("exp", 0, 0, results_root=root)
+
+    assert data["individual_results"][0]["question"] == "new"
+    assert data["individual_results"][0]["usage"][0]["total_tokens"] == 10
+    assert "question_key" in data["individual_results"][0]
+
+
 # ---------------------------------------------------------------------------
 # align_experiments
 # ---------------------------------------------------------------------------

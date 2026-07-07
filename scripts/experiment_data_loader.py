@@ -109,6 +109,8 @@ def load_result_file(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     for r in data.get("individual_results", []):
         r["question_key"] = question_key(r["sample_id"], r["question"])
+        r.setdefault("retrieval_info", r.get("retrieval", {}))
+        r.setdefault("raw_context", r.get("context", {}).get("text", ""))
     return data
 
 
@@ -119,14 +121,16 @@ def load_experiment_results(
     results_root: Path = RESULTS_ROOT,
 ) -> dict[str, Any]:
     """Load results for a specific (experiment, construction_run, qa_run) triple."""
-    path = (
+    run_dir = (
         results_root
         / experiment_id
         / f"construction_run_{construction_run:02d}"
         / "robust"
         / f"qa_run_{qa_run:02d}"
-        / "results.json"
     )
+    normalized_path = run_dir / "normalized" / "results.json"
+    legacy_path = run_dir / "results.json"
+    path = normalized_path if normalized_path.exists() else legacy_path
     if not path.exists():
         raise FileNotFoundError(f"Results not found: {path}")
     return load_result_file(path)
