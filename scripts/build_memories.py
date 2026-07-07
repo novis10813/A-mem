@@ -34,10 +34,13 @@ from experiment_common import (  # noqa: E402
     write_manifest,
 )
 from experiment_config import build_args_from_config, load_experiment_config  # noqa: E402
+from amem.benchmark.artifacts import write_jsonl, write_memory_store  # noqa: E402
+from amem.benchmark.schemas import to_jsonable  # noqa: E402
 from amem.llm_text_parsers import set_keyword_pruning_mode  # noqa: E402
 from amem.load_dataset import load_locomo_dataset  # noqa: E402
 from amem.memory_layer_robust import RobustAgenticMemorySystem  # noqa: E402
 from amem.memory_pipeline import MemoryProcessingPipeline, PipelineTimingHook  # noqa: E402
+from amem.methods.amem.serialization import memories_to_store  # noqa: E402
 
 
 def select_samples(samples: Sequence[Any], ratio: float, sample_limit: int | None) -> list[Any]:
@@ -89,6 +92,27 @@ def build_sample_cache(
     agent.retriever.save(str(retriever_cache_file), str(retriever_embeddings_file))
     if not retriever_embeddings_file.exists():
         np.save(retriever_embeddings_file, np.empty((0, 0)))
+
+    normalized_dir = output_dir / "normalized"
+    private_refs = {
+        "memory_cache": str(memory_cache_file.relative_to(output_dir)),
+        "retriever_cache": str(retriever_cache_file.relative_to(output_dir)),
+        "retriever_embeddings": str(retriever_embeddings_file.relative_to(output_dir)),
+    }
+    store = memories_to_store(agent.memories, sample_idx, private_refs=private_refs)
+    write_memory_store(normalized_dir / f"memory_store_sample_{sample_idx}.json", store)
+    write_jsonl(
+        normalized_dir / f"memory_records_sample_{sample_idx}.jsonl",
+        [to_jsonable(record) for record in store.records],
+    )
+    write_jsonl(
+        normalized_dir / f"memory_nodes_sample_{sample_idx}.jsonl",
+        [to_jsonable(node) for node in store.nodes],
+    )
+    write_jsonl(
+        normalized_dir / f"memory_edges_sample_{sample_idx}.jsonl",
+        [to_jsonable(edge) for edge in store.edges],
+    )
 
     return {
         "construction_run": construction_run,
@@ -169,6 +193,13 @@ def build_construction_run(
     missing = [path for path in expected_cache_files(output_dir, sample_indices) if not path.exists()]
     if missing:
         raise RuntimeError(f"Construction run missing expected cache files: {missing}")
+    normalized_missing = [
+        output_dir / "normalized" / f"memory_store_sample_{sample_idx}.json"
+        for sample_idx in sample_indices
+        if not (output_dir / "normalized" / f"memory_store_sample_{sample_idx}.json").exists()
+    ]
+    if normalized_missing:
+        raise RuntimeError(f"Construction run missing normalized memory stores: {normalized_missing}")
 
 
 def parse_args() -> argparse.Namespace:

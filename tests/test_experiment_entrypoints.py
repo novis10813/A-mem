@@ -2,6 +2,8 @@ import csv
 import json
 from pathlib import Path
 
+from amem.benchmark.artifacts import read_memory_store
+from amem.benchmark.schemas import MemoryRecord, MemoryStore
 from scripts import experiment_common as ec
 
 
@@ -44,3 +46,16 @@ def test_summary_aggregation_preserves_run_condition_and_metric_columns(tmp_path
 
     summary = json.loads((mode_dir / "summary_across_runs.json").read_text(encoding="utf-8"))
     assert summary["summary"][0]["runs"] == 2
+
+
+def test_amem_store_files_use_normalized_construction_directory(tmp_path: Path):
+    store = MemoryStore(
+        sample_id=0,
+        records=(MemoryRecord(memory_id="m0", sample_id=0, text="hello"),),
+    )
+    normalized_dir = tmp_path / "construction_run_00" / "normalized"
+    from amem.benchmark.artifacts import write_memory_store
+
+    write_memory_store(normalized_dir / "memory_store_sample_0.json", store)
+
+    assert read_memory_store(normalized_dir / "memory_store_sample_0.json") == store
