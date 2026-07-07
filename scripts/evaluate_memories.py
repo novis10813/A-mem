@@ -41,6 +41,7 @@ from experiment_common import (  # noqa: E402
     write_manifest,
 )
 from experiment_config import evaluate_args_from_config, load_experiment_config  # noqa: E402
+from amem.benchmark.results import write_run_results  # noqa: E402
 from amem.load_dataset import load_locomo_dataset  # noqa: E402
 from amem.memory_layer_robust import (  # noqa: E402
     RobustLLMController,
@@ -57,6 +58,7 @@ from amem.retrieval_pipeline import (  # noqa: E402
     LimitStage,
     RetrievalPipeline,
 )
+from amem.methods.amem.qa import robust_dict_to_qa_results  # noqa: E402
 
 
 METRICS = ("f1", "bleu1")
@@ -375,6 +377,9 @@ def write_robust_run(
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "results.json").open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
+    normalized_results = robust_dict_to_qa_results(result, args.experiment_id)
+    normalized_dir = run_dir / "normalized"
+    write_run_results(normalized_dir, normalized_results)
 
 
 def retrieval_pipeline_to_json(config: Any) -> dict[str, Any] | None:
