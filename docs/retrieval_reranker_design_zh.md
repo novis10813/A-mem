@@ -80,6 +80,7 @@ RetrievalRequest + list[MemoryCandidate] -> list[MemoryCandidate]
 |---|---|---|
 | `embedding` | 第一階段 candidate generator，使用 cached embedding retriever | `similarity_query` |
 | `bm25` | 第一階段 candidate generator，從 memory cache 即時建 BM25 index | `similarity_query` |
+| `embedding_rerank` | 對輸入 candidates 使用 cached embeddings 做 cosine similarity 重排 | `similarity_query` |
 | `bm25_rerank` | 對輸入 candidates 建臨時 BM25 index 後重排 | `original_question` |
 | `cross_encoder` | 用 CrossEncoder 對 `(question, candidate memory text)` 打分重排 | `original_question` |
 | `limit` | 中途裁切 candidate pool | 不使用 query |
@@ -275,11 +276,11 @@ evaluation:
 - `type: bm25` 從同一份 memory cache 即時建 BM25 index，適合固定 cache 比較 retrieval effect。
 - `cache_experiment_id` 指向讀取 cache 的 experiment；`experiment_id` 指向本次 evaluation result。
 - 若要隔離 first-stage retrieval 效果，pipeline 只放一個 generator stage。
-- 若要測試第二階段排序效果，使用 `embedding -> bm25_rerank` 或 `embedding -> cross_encoder`。
+- 若要測試第二階段排序效果，使用 `embedding -> bm25_rerank`、`embedding -> cross_encoder`，或 `bm25 -> embedding_rerank -> cross_encoder`。
 
 ## 8. 模組邊界
 
-- `src/amem/retrieval_pipeline.py`：pipeline abstraction、candidate generators、BM25 reranker、CrossEncoder stage、canonical `MemoryCandidate`。
+- `src/amem/retrieval_pipeline.py`：pipeline abstraction、candidate generators、embedding/BM25 reranker、CrossEncoder stage、canonical `MemoryCandidate`。
 - `src/amem/reranking.py`：CrossEncoder reranker implementation 與 factory。
 - `src/amem/memory_layer_robust.py`：robust memory system 呼叫 retrieval pipeline、render context、寫 retrieval metadata。
 - `test_advanced_robust.py`：legacy robust evaluator；保留 reranker flags 以維持單檔入口可用。

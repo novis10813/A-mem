@@ -36,6 +36,9 @@ evaluation:
       - type: embedding
         name: embedding_candidates
         top_k: 50
+      - type: embedding_rerank
+        name: embedding_rerank
+        top_k: 25
       - type: cross_encoder
         name: cross_encoder_rerank
         top_k: 10
@@ -57,8 +60,9 @@ run:
     assert eval_args.retrieve_k == 10
     assert eval_args.retrieval_pipeline.final_k == 10
     assert eval_args.retrieval_pipeline.stages[0].type == "embedding"
-    assert eval_args.retrieval_pipeline.stages[1].type == "cross_encoder"
-    assert eval_args.retrieval_pipeline.stages[1].batch_size == 16
+    assert eval_args.retrieval_pipeline.stages[1].type == "embedding_rerank"
+    assert eval_args.retrieval_pipeline.stages[2].type == "cross_encoder"
+    assert eval_args.retrieval_pipeline.stages[2].batch_size == 16
     assert eval_args.resume is True
 
 

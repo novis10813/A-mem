@@ -143,6 +143,55 @@ class EmbeddingCandidateGenerator(BaseStage):
         return generated
 
 
+class EmbeddingRerankerStage(BaseStage):
+    def __init__(
+        self,
+        *,
+        name: str = "embedding_rerank",
+        top_k: int,
+        retriever: Any,
+        query: str = "similarity_query",
+    ) -> None:
+        super().__init__(name=name, top_k=top_k, query=query, stage_type="embedding_rerank")
+        self.retriever = retriever
+
+    def run(
+        self,
+        request: RetrievalRequest,
+        candidates: Sequence[MemoryCandidate],
+    ) -> list[MemoryCandidate]:
+        if not candidates or self.top_k < 1:
+            return []
+        if not hasattr(self.retriever, "model") or getattr(self.retriever, "embeddings", None) is None:
+            ranked_indices = [int(index) for index in self.retriever.search(self._query_text(request), len(candidates))]
+            rank_lookup = {memory_index: rank for rank, memory_index in enumerate(ranked_indices)}
+            ranked = sorted(
+                enumerate(candidates),
+                key=lambda item: (rank_lookup.get(item[1].memory_index, len(ranked_indices)), item[0]),
+            )[: self.top_k]
+            return [
+                candidate.with_stage(stage_name=self.name, rank=rank)
+                for rank, (_, candidate) in enumerate(ranked, start=1)
+            ]
+
+        import numpy as np
+
+        query_embedding = np.asarray(self.retriever.model.encode([self._query_text(request)])[0])
+        embeddings = np.asarray(self.retriever.embeddings)
+        scored: list[tuple[int, MemoryCandidate, float]] = []
+        query_norm = float(np.linalg.norm(query_embedding)) or 1.0
+        for original_rank, candidate in enumerate(candidates):
+            memory_embedding = embeddings[candidate.memory_index]
+            memory_norm = float(np.linalg.norm(memory_embedding)) or 1.0
+            score = float(np.dot(query_embedding, memory_embedding) / (query_norm * memory_norm))
+            scored.append((original_rank, candidate, score))
+        scored.sort(key=lambda item: (-item[2], item[0]))
+        return [
+            candidate.with_stage(stage_name=self.name, rank=rank, score=score)
+            for rank, (_, candidate, score) in enumerate(scored[: self.top_k], start=1)
+        ]
+
+
 class BM25CandidateGenerator(BaseStage):
     def __init__(
         self,

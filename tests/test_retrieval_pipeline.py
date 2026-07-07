@@ -4,6 +4,7 @@ from amem.retrieval_pipeline import (
     BM25Reranker,
     CrossEncoderRerankerStage,
     EmbeddingCandidateGenerator,
+    EmbeddingRerankerStage,
     RetrievalPipeline,
     RetrievalRequest,
 )
@@ -34,6 +35,21 @@ class FakeReranker:
             for index in self.ordered
             if index in {candidate.memory_index for candidate in candidates}
         ][:top_k]
+
+
+class FakeEmbeddingModel:
+    def encode(self, texts):
+        vectors = {
+            "museum": [1.0, 0.0],
+        }
+        return [vectors.get(text, [0.0, 1.0]) for text in texts]
+
+
+class FakeEmbeddingRetriever(FakeRetriever):
+    def __init__(self, indices, embeddings):
+        super().__init__(indices)
+        self.model = FakeEmbeddingModel()
+        self.embeddings = embeddings
 
 
 def memory_text(memory):
@@ -84,6 +100,28 @@ def test_bm25_reranker_uses_original_question():
     assert [candidate.memory_index for candidate in reranked] == [1, 2]
     assert "bm25_rerank" in reranked[0].scores
     assert reranked[0].ranks["bm25_rerank"] == 1
+
+
+def test_embedding_reranker_scores_existing_candidates():
+    memories = make_memories()
+    candidates = [
+        EmbeddingCandidateGenerator(
+            top_k=3,
+            retriever=FakeRetriever([0, 1, 2]),
+            memories=memories,
+            memory_text=memory_text,
+        ).run(RetrievalRequest("irrelevant", None, 3), [])[index]
+        for index in [0, 1, 2]
+    ]
+    retriever = FakeEmbeddingRetriever([0, 1, 2], [[0.0, 1.0], [1.0, 0.0], [0.8, 0.2]])
+    reranked = EmbeddingRerankerStage(top_k=2, retriever=retriever).run(
+        RetrievalRequest("museum", None, 2),
+        candidates,
+    )
+
+    assert [candidate.memory_index for candidate in reranked] == [1, 2]
+    assert "embedding_rerank" in reranked[0].scores
+    assert reranked[0].ranks["embedding_rerank"] == 1
 
 
 def test_pipeline_embedding_bm25_final_k():

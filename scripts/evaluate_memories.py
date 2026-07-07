@@ -53,6 +53,7 @@ from amem.retrieval_pipeline import (  # noqa: E402
     BM25Reranker,
     CrossEncoderRerankerStage,
     EmbeddingCandidateGenerator,
+    EmbeddingRerankerStage,
     LimitStage,
     RetrievalPipeline,
 )
@@ -222,6 +223,15 @@ def build_retrieval_pipeline(config: Any, memory_system: Any) -> RetrievalPipeli
                     memories=memories,
                     memory_text=memory_system._memory_rerank_text,
                     document_text=robust_retrieval_document,
+                )
+            )
+        elif stage.type == "embedding_rerank":
+            stages.append(
+                EmbeddingRerankerStage(
+                    name=stage.name,
+                    top_k=stage.top_k,
+                    query=stage.query,
+                    retriever=memory_system.retriever,
                 )
             )
         elif stage.type == "bm25_rerank":

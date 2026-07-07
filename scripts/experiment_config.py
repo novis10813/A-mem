@@ -262,7 +262,7 @@ def validate_experiment_config(config: ExperimentConfig) -> None:
     if pipeline.stages[0].type not in {"embedding", "bm25"}:
         raise ValueError("first retrieval pipeline stage must be embedding or bm25")
     for stage in pipeline.stages:
-        if stage.type not in {"embedding", "bm25", "bm25_rerank", "cross_encoder", "limit"}:
+        if stage.type not in {"embedding", "bm25", "embedding_rerank", "bm25_rerank", "cross_encoder", "limit"}:
             raise ValueError(f"unknown retrieval pipeline stage type: {stage.type}")
         if stage.query not in {"similarity_query", "original_question"}:
             raise ValueError(f"unknown retrieval pipeline query selector: {stage.query}")
