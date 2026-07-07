@@ -188,6 +188,23 @@ class RetrievalToolCall:
 
 
 @dataclass(frozen=True)
+class UsageRecord:
+    phase: str
+    call_id: str
+    provider: str | None = None
+    model: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_tokens: int | None = None
+    cost_usd: float | None = None
+    latency_seconds: float | None = None
+    source: str = "reported"
+    tokenizer: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class QAResult:
     experiment_id: str
     construction_run: int
@@ -202,6 +219,7 @@ class QAResult:
     retrieval: Mapping[str, Any]
     context: Mapping[str, Any]
     prompt: str | None
+    usage: tuple[UsageRecord, ...] = ()
     errors: tuple[Mapping[str, Any], ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 ```
@@ -315,7 +333,8 @@ Recommended hook events:
 - `before_tool_call`
 - `after_tool_call`
 - `before_prompt`
-- `after_llm`
+- `before_llm_call`
+- `after_llm_call`
 - `after_answer_parse`
 - `on_error`
 
@@ -327,14 +346,74 @@ Appropriate hook uses:
 - prompt template substitution;
 - debug dumps;
 - field ablations;
-- context text redaction or formatting experiments.
+- context text redaction or formatting experiments;
 - graph-to-record flattening baselines;
 - temporal filtering or timestamp normalization when configured as an explicit
-  experiment condition.
+  experiment condition;
+- token, cost, and latency accounting.
 
 Do not use hooks to silently replace a major component such as the retrieval
 algorithm, construction semantics, or QA task definition. Those should be
 explicit adapters, retrieval stages, or named toolsets.
+
+### Token, Cost, and Latency Accounting
+
+Token accounting should be implemented as a standard observability hook, not as
+a construction, retrieval, or QA adapter. It does not define a method; it records
+the resource usage of whatever method is being evaluated.
+
+The hook should capture usage at every LLM boundary:
+
+- construction-time LLM calls, including note generation, rewrite, extraction,
+  graph construction, and memory evolution;
+- query-time LLM calls, including query generation, reranker prompts when any,
+  answer generation, answer parsing, and LLM judge metrics;
+- tool-calling QA loops, with one usage record per LLM step and tool-call
+  planning step;
+- optional embedding or reranker latency/cost records when the provider exposes
+  meaningful usage.
+
+Usage records should preserve whether counts are provider-reported or estimated:
+
+```json
+{
+  "phase": "qa",
+  "call_id": "sample_0_qa_3_answer",
+  "provider": "ollama",
+  "model": "llama3.2:1b",
+  "prompt_tokens": 1234,
+  "completion_tokens": 120,
+  "total_tokens": 1354,
+  "source": "reported",
+  "latency_seconds": 2.31
+}
+```
+
+For local models or APIs that do not return token usage, the hook may estimate
+counts with the configured tokenizer and must mark that explicitly:
+
+```json
+{
+  "phase": "qa",
+  "call_id": "sample_0_qa_3_answer",
+  "model": "llama3.2:1b",
+  "estimated_tokens": 1401,
+  "source": "estimated",
+  "tokenizer": "llama3"
+}
+```
+
+Per-query summaries should include at least:
+
+- construction tokens amortized per sample and per memory where available;
+- QA tokens per question;
+- total tokens per question, including tool-calling loops;
+- latency per question;
+- optional estimated cost in USD when pricing is configured.
+
+Reported and estimated usage should not be mixed silently in aggregate tables.
+Summaries must include counts by `source` so paper tables can distinguish
+provider-reported usage from tokenizer estimates.
 
 ## Retrieval and Memory Access
 
@@ -464,6 +543,10 @@ limits:
 run:
   resume: true
   max_workers: 10
+  hooks:
+    - type: token_usage
+      mode: reported_or_estimated
+      estimate_when_missing: true
 ```
 
 Compatibility can be preserved by translating the current YAML schema into this
@@ -537,6 +620,7 @@ artifacts/
     manifest.json
     construction_run_00/
       metadata.json
+      usage_summary.json
       private/
         memory_cache_sample_0.pkl
         retriever_cache_sample_0.pkl
@@ -554,7 +638,9 @@ artifacts/
       qa_run_00/
         results.jsonl
         results.json
+        usage_summary.json
         summary.json
+      usage_across_runs.csv
       summary_across_runs.csv
       summary_across_runs.json
 ```
@@ -590,6 +676,9 @@ Instead, it should discover normalized result files and use stable fields:
 - `retrieval.tool_calls`
 - `context.text`
 - `prompt`
+- `usage.total_tokens`
+- `usage.latency_seconds`
+- `usage.source`
 
 Mode-specific visualizations can still exist, but the default comparison view
 should be method-neutral.
@@ -600,12 +689,14 @@ The dashboard should support three views over the same normalized result:
 - retrieved support comparison, using `retrieval.items`;
 - graph/tool trace inspection, using `retrieval.tool_calls`, node IDs, edge IDs,
   paths, and temporal filters where available.
+- usage comparison, using per-query tokens, construction/query split, latency,
+  cost, and reported-versus-estimated source.
 
 ## Migration Plan
 
 1. Add benchmark schemas, config parsing, registry, and artifact helpers,
    including `MemoryStore`, `MemoryRecord`, `MemoryNode`, `MemoryEdge`, and
-   `RetrievalToolCall`.
+   `RetrievalToolCall`, and `UsageRecord`.
 2. Add an A-Mem construction adapter that wraps `RobustAgenticMemorySystem` and
    writes both private pickle caches and normalized `MemoryStore` files.
 3. Add retrieval adapters that operate on normalized stores and records:
@@ -620,7 +711,7 @@ The dashboard should support three views over the same normalized result:
 5. Add context builders:
    - `amem_full`;
    - `content_keywords`;
-   - generic `memory_fields`.
+   - generic `memory_fields`;
    - `tool_trace_context`;
    - graph path / node evidence context.
 6. Add QA adapters:
@@ -633,7 +724,8 @@ The dashboard should support three views over the same normalized result:
 8. Refactor `scripts/evaluate_memories.py` into a thin runner over retrieval,
    context, and QA adapters while preserving old flags.
 9. Update dashboard loader to consume normalized stores and results.
-10. Deprecate old `qa_mode` branches after compatibility tests pass.
+10. Add the standard token usage hook and aggregate usage summaries.
+11. Deprecate old `qa_mode` branches after compatibility tests pass.
 
 ## Testing Strategy
 
@@ -649,6 +741,10 @@ Unit tests:
 - retrieval stages produce deterministic ordering on toy records;
 - graph retrieval produces deterministic paths on toy graphs;
 - tool-calling QA records every tool call and retrieved support item;
+- token usage hook records reported usage when provider metadata exists;
+- token usage hook marks estimated usage separately when provider metadata is
+  missing;
+- usage summaries aggregate per query, per QA run, and per construction run;
 - context builders include only configured fields;
 - QA result writer emits dashboard-readable rows.
 
