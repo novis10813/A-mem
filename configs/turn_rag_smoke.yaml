@@ -1,0 +1,38 @@
+experiment:
+  id: turn_rag_smoke
+  description: Offline LoCoMo turn-RAG smoke run
+pipeline:
+  stages: [construction, retrieve_qa]
+  dataset:
+    adapter: locomo
+    path: data/locomo10.json
+  construction:
+    adapter: turn_rag
+    runs: 1
+    chunker:
+      adapter: turn
+    selection:
+      sample_limit: 1
+      turn_limit: 2
+  retrieve_qa:
+    runs: 1
+    retrieval:
+      adapter: staged
+      stages:
+        - adapter: bm25
+          top_k: 2
+    context:
+      adapter: records
+      fields: [timestamp, speaker, content]
+    qa:
+      adapter: extractive
+    metrics:
+      - adapter: exact_match
+    selection:
+      sample_limit: 1
+      question_limit: 1
+runtime:
+  artifact_root: artifacts/experiments
+  max_workers: 1
+  resume: true
+  on_error: continue
