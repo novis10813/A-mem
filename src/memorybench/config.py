@@ -34,6 +34,15 @@ class LLMConfig(StrictModel):
     model: str
     params: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_max_tokens(self):
+        max_tokens = self.params.get("max_tokens")
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1
+        ):
+            raise ValueError("llm.params.max_tokens must be a positive integer")
+        return self
+
 
 class DatasetConfig(ComponentConfig):
     path: Path

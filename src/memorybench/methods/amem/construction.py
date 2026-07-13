@@ -74,6 +74,7 @@ class AMemConstruction:
             api_base=llm.params.get("base_url"),
             sglang_host=llm.params.get("host", "http://localhost"),
             sglang_port=int(llm.params.get("port", 30000)),
+            max_tokens=int(llm.params.get("max_tokens", 1000)),
             retrieval_mode=retrieval_mode,
             evo_threshold=int(self.config.params.get("evolution_threshold", 100)),
         )

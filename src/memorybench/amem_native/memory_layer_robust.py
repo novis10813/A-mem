@@ -227,11 +227,13 @@ class RobustVLLMController(RobustBaseLLMController):
 
     def __init__(self, model: str = "llama2",
                  vllm_host: str = "http://localhost",
-                 vllm_port: int = 30000):
+                 vllm_port: int = 30000,
+                 max_tokens: int = 1000):
         import requests as _requests
         self._requests = _requests
         self.model = model
         self.base_url = f"{vllm_host}:{vllm_port}"
+        self.max_tokens = max_tokens
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
@@ -242,7 +244,7 @@ class RobustVLLMController(RobustBaseLLMController):
                 {"role": "user", "content": prompt},
             ],
             "temperature": temperature,
-            "max_tokens": 1000,
+            "max_tokens": self.max_tokens,
         }
         response = self._requests.post(
             f"{self.base_url}/v1/chat/completions",
@@ -299,7 +301,8 @@ class RobustLLMController:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 max_tokens: int = 1000):
         if backend == "openai":
             self.llm = RobustOpenAIController(model, api_key)
         elif backend == "ollama":
@@ -307,7 +310,7 @@ class RobustLLMController:
         elif backend == "sglang":
             self.llm = RobustSGLangController(model, sglang_host, sglang_port)
         elif backend == "vllm":
-            self.llm = RobustVLLMController(model, sglang_host, sglang_port)
+            self.llm = RobustVLLMController(model, sglang_host, sglang_port, max_tokens)
         else:
             raise ValueError("Backend must be 'openai', 'ollama', 'sglang', or 'vllm'")
 
@@ -418,6 +421,7 @@ class RobustAgenticMemorySystem:
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
                  check_connection: bool = False,
+                 max_tokens: int = 1000,
                  pipeline: Optional[MemoryProcessingPipeline] = None,
                  reranker: Optional[BaseReranker] = None,
                  rerank_top_n: Optional[int] = None,
@@ -433,7 +437,7 @@ class RobustAgenticMemorySystem:
             raise ValueError("retrieval_mode must be 'embedding' or 'bm25'")
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
-            sglang_host, sglang_port, check_connection,
+            sglang_host, sglang_port, check_connection, max_tokens,
         )
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold

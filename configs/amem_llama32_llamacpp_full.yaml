@@ -1,0 +1,59 @@
+experiment:
+  id: amem_llama32_llamacpp_full
+  description: Full LoCoMo native A-Mem experiment using llama.cpp llama3.2 at port 8080
+  tags: [amem, llama3.2, llamacpp, full]
+
+pipeline:
+  stages: [construction, retrieve_qa]
+  dataset:
+    adapter: locomo
+    path: data/locomo10.json
+
+  construction:
+    adapter: amem
+    runs: 1
+    llm:
+      # llama.cpp exposes an OpenAI-compatible endpoint. The native A-Mem
+      # controller uses the vllm-compatible adapter for this endpoint.
+      provider: vllm
+      model: llama3.2
+      params:
+        host: http://127.0.0.1
+        port: 8080
+        max_tokens: 256
+    params:
+      retrieval_mode: embedding
+      embedding_model: all-MiniLM-L6-v2
+      keyword_pruning_mode: none
+
+  retrieve_qa:
+    runs: 1
+    retrieval:
+      adapter: staged
+      stages:
+        - adapter: embedding
+          top_k: 10
+          params:
+            model: all-MiniLM-L6-v2
+    context:
+      adapter: amem
+    qa:
+      adapter: robust
+      llm:
+        provider: vllm
+        model: llama3.2
+        params:
+          host: http://127.0.0.1
+          port: 8080
+          max_tokens: 64
+    metrics:
+      - adapter: exact_match
+      - adapter: f1
+      - adapter: bleu1
+
+runtime:
+  artifact_root: artifacts/experiments
+  max_workers: 3
+  resume: true
+  on_error: stop
+  seed: 0
