@@ -15,6 +15,8 @@ from urllib.request import Request, urlopen
 
 from memorybench.artifacts import atomic_json
 from memorybench.datasets.financebench import (
+    PUBLIC_FINANCEBENCH_SCOPE,
+    FinanceBenchScope,
     PREPARED_SCHEMA_VERSION,
     PREPARATION_MANIFEST_SCHEMA_VERSION,
 )
@@ -46,6 +48,7 @@ def prepare_financebench(
     *,
     fetch: Callable[[str], bytes] = fetch_url,
     extractor: Callable[[Path], list[str]] | None = None,
+    scope: FinanceBenchScope = PUBLIC_FINANCEBENCH_SCOPE,
 ) -> PreparationResult:
     if workers < 1:
         raise ValueError("workers must be at least 1")
@@ -59,6 +62,7 @@ def prepare_financebench(
     question_bytes: bytes | None = None
     metadata_bytes: bytes | None = None
     extraction_version = "unavailable"
+    required_documents: list[str] = []
     try:
         extraction_version = pypdf_version() if extractor is None else "injected"
         revision = resolve_revision(fetch)
@@ -69,6 +73,11 @@ def prepare_financebench(
         questions = read_jsonl_bytes(question_bytes, "financebench_open_source.jsonl")
         metadata = read_jsonl_bytes(metadata_bytes, "financebench_document_information.jsonl")
         questions_by_doc = source_questions_by_document(questions)
+        required_documents = sorted(questions_by_doc)
+        scope.validate(
+            required_documents,
+            [question["financebench_id"] for questions in questions_by_doc.values() for question in questions],
+        )
         referenced_metadata = [
             row for row in metadata
             if isinstance(row.get("doc_name"), str) and row["doc_name"] in questions_by_doc
@@ -128,6 +137,7 @@ def prepare_financebench(
         atomic_json(prepared_path, prepared)
         manifest = manifest_payload(
             "completed", revision, question_bytes, metadata_bytes, reports,
+            required_documents=required_documents,
             prepared_sha256=sha256_file(prepared_path), extraction_version=extraction_version,
         )
         atomic_json(manifest_path, manifest)
@@ -136,6 +146,7 @@ def prepare_financebench(
         prepared_path.unlink(missing_ok=True)
         atomic_json(manifest_path, manifest_payload(
             "failed", revision, question_bytes, metadata_bytes, reports,
+            required_documents=required_documents,
             error=f"{type(exc).__name__}: {exc}", extraction_version=extraction_version,
         ))
         raise RuntimeError(f"FinanceBench preparation failed: {exc}") from exc
@@ -301,6 +312,7 @@ def manifest_payload(
     metadata_bytes: bytes | None,
     reports: Mapping[str, Mapping[str, Any]],
     *,
+    required_documents: Sequence[str] = (),
     prepared_sha256: str | None = None,
     error: str | None = None,
     extraction_version: str,
@@ -318,7 +330,7 @@ def manifest_payload(
             "extraction_mode": "layout",
             "pypdf_version": extraction_version,
         },
-        "required_documents": sorted(reports),
+        "required_documents": sorted(required_documents),
         "documents": {name: reports[name] for name in sorted(reports)},
     }
     if prepared_sha256 is not None:

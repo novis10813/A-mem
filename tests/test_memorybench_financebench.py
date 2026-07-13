@@ -8,6 +8,12 @@ import pytest
 from memorybench.registry import component_catalog
 
 
+def fixture_scope(question_count: int = 2, document_count: int = 1):
+    from memorybench.datasets.financebench import FinanceBenchScope
+
+    return FinanceBenchScope(question_count=question_count, document_count=document_count)
+
+
 def test_financebench_extra_declares_pdf_crypto_dependencies():
     with (Path(__file__).parents[1] / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)
@@ -61,7 +67,7 @@ def write_prepared(tmp_path: Path, *, manifest_status: str = "completed") -> Pat
 def test_financebench_adapter_emits_document_samples_and_native_taxonomy(tmp_path: Path):
     from memorybench.datasets.financebench import FinanceBenchAdapter
 
-    bundle = FinanceBenchAdapter().load(write_prepared(tmp_path))
+    bundle = FinanceBenchAdapter(fixture_scope()).load(write_prepared(tmp_path))
 
     assert bundle.dataset_id == "financebench"
     assert bundle.samples[0].sample_id == "financebench:Acme_2023_10K"
@@ -82,12 +88,46 @@ def test_financebench_adapter_rejects_unprepared_or_tampered_input(tmp_path: Pat
 
     path = write_prepared(tmp_path, manifest_status="failed")
     with pytest.raises(ValueError, match="manifest status is not completed"):
-        FinanceBenchAdapter().load(path)
+        FinanceBenchAdapter(fixture_scope()).load(path)
 
     path = write_prepared(tmp_path)
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="prepared_sha256 mismatch"):
-        FinanceBenchAdapter().load(path)
+        FinanceBenchAdapter(fixture_scope()).load(path)
+
+
+def test_financebench_adapter_enforces_public_scope_by_default(tmp_path: Path):
+    from memorybench.datasets.financebench import FinanceBenchAdapter
+
+    with pytest.raises(ValueError, match="expected 150 unique question IDs, got 2"):
+        FinanceBenchAdapter().load(write_prepared(tmp_path))
+
+
+def test_financebench_adapter_rejects_scope_drift_in_prepared_data(tmp_path: Path):
+    from memorybench.datasets.financebench import FinanceBenchAdapter, FinanceBenchScope
+
+    path = write_prepared(tmp_path)
+    prepared = json.loads(path.read_text(encoding="utf-8"))
+    prepared["documents"][0]["questions"][1]["question_id"] = "financebench_id_00001"
+    encoded = json.dumps(prepared, sort_keys=True).encode("utf-8")
+    path.write_bytes(encoded)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["prepared_sha256"] = hashlib.sha256(encoded).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate FinanceBench financebench_id financebench_id_00001"):
+        FinanceBenchAdapter(FinanceBenchScope(question_count=2, document_count=1)).load(path)
+
+
+def test_financebench_adapter_rejects_non_object_manifest(tmp_path: Path):
+    from memorybench.datasets.financebench import FinanceBenchAdapter
+
+    path = write_prepared(tmp_path)
+    (tmp_path / "manifest.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest must be an object"):
+        FinanceBenchAdapter(fixture_scope()).load(path)
 
 
 def raw_question(question_id: str, page_index: int, *, reasoning: str | None = "Information extraction"):
@@ -116,6 +156,87 @@ def raw_metadata():
         "doc_period": 2023,
         "doc_link": "https://example.test/acme.pdf",
     }
+
+
+@pytest.mark.parametrize(
+    ("questions", "scope_counts", "error"),
+    [
+        (
+            [raw_question("financebench_id_00001", 0), raw_question("financebench_id_00001", 0)],
+            (2, 1),
+            "duplicate FinanceBench financebench_id financebench_id_00001",
+        ),
+        (
+            [raw_question("financebench_id_00001", 0)],
+            (2, 1),
+            "expected 2 unique question IDs, got 1",
+        ),
+        (
+            [raw_question("financebench_id_00001", 0), raw_question("financebench_id_00002", 0)],
+            (1, 1),
+            "expected 1 unique question IDs, got 2",
+        ),
+        (
+            [raw_question("financebench_id_00001", 0)],
+            (1, 2),
+            "expected 2 document names, got 1",
+        ),
+    ],
+)
+def test_prepare_rejects_duplicate_and_drifting_scope_before_pdf_downloads(
+    tmp_path: Path, questions, scope_counts, error,
+):
+    from memorybench.datasets.financebench import FinanceBenchScope
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("financebench_open_source.jsonl"):
+            return "".join(json.dumps(question) + "\n" for question in questions).encode("utf-8")
+        if url.endswith("financebench_document_information.jsonl"):
+            return (json.dumps(raw_metadata()) + "\n").encode("utf-8")
+        raise AssertionError(url)
+
+    with pytest.raises(RuntimeError, match=error):
+        prepare_financebench(
+            tmp_path / "financebench",
+            fetch=fetch,
+            extractor=lambda path: ["Revenue was $10."],
+            scope=FinanceBenchScope(question_count=scope_counts[0], document_count=scope_counts[1]),
+        )
+
+    assert not any("/pdfs/" in url for url in calls)
+
+
+def test_prepare_failed_manifest_preserves_question_derived_required_documents(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    invalid_metadata = raw_metadata()
+    invalid_metadata.pop("doc_link")
+
+    def fetch(url: str) -> bytes:
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("financebench_open_source.jsonl"):
+            return (json.dumps(raw_question("financebench_id_00001", 0)) + "\n").encode("utf-8")
+        if url.endswith("financebench_document_information.jsonl"):
+            return (json.dumps(invalid_metadata) + "\n").encode("utf-8")
+        raise AssertionError(url)
+
+    with pytest.raises(RuntimeError, match="doc_link must be a non-empty string"):
+        prepare_financebench(
+            tmp_path / "financebench",
+            fetch=fetch,
+            extractor=lambda path: ["Revenue was $10."],
+            scope=fixture_scope(question_count=1),
+        )
+
+    manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["required_documents"] == ["Acme_2023_10K"]
 
 
 def test_build_prepared_document_uses_page_fallback_and_page_evidence_ids():
@@ -191,6 +312,7 @@ def test_prepare_downloads_only_referenced_pdfs_and_reuses_verified_pdf(tmp_path
 
     result = prepare_financebench(
         tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+        scope=fixture_scope(question_count=1),
     )
 
     assert result.document_count == 1
@@ -203,6 +325,7 @@ def test_prepare_downloads_only_referenced_pdfs_and_reuses_verified_pdf(tmp_path
 
     prepare_financebench(
         tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+        scope=fixture_scope(question_count=1),
     )
     assert sum(url.endswith("pdfs/Acme_2023_10K.pdf") for url in calls) == 1
 
@@ -233,6 +356,7 @@ def test_prepare_ignores_duplicate_unreferenced_metadata_rows(tmp_path: Path):
 
     result = prepare_financebench(
         tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+        scope=fixture_scope(question_count=1),
     )
 
     assert result.document_count == 1
@@ -261,9 +385,11 @@ def test_prepare_refetches_pdf_when_upstream_revision_changes(tmp_path: Path):
 
     prepare_financebench(
         tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+        scope=fixture_scope(question_count=1),
     )
     prepare_financebench(
         tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+        scope=fixture_scope(question_count=1),
     )
 
     pdf_calls = [url for url in calls if url.endswith("pdfs/Acme_2023_10K.pdf")]
@@ -300,9 +426,11 @@ def test_prepare_writes_identical_prepared_json_for_one_and_two_workers(tmp_path
 
     first = prepare_financebench(
         tmp_path / "one", workers=1, fetch=fetch, extractor=lambda path: [f"Revenue for {path.stem}."],
+        scope=fixture_scope(question_count=2, document_count=2),
     )
     second = prepare_financebench(
         tmp_path / "two", workers=2, fetch=fetch, extractor=lambda path: [f"Revenue for {path.stem}."],
+        scope=fixture_scope(question_count=2, document_count=2),
     )
 
     assert (first.output / "prepared.json").read_bytes() == (second.output / "prepared.json").read_bytes()
@@ -324,7 +452,9 @@ def test_prepare_checks_for_pypdf_before_any_network_fetch(monkeypatch, tmp_path
         return b""
 
     with pytest.raises(RuntimeError, match="requires pypdf"):
-        preparation.prepare_financebench(tmp_path / "financebench", fetch=fetch)
+        preparation.prepare_financebench(
+            tmp_path / "financebench", fetch=fetch, scope=fixture_scope(question_count=1),
+        )
 
     assert fetched is False
 
@@ -348,11 +478,15 @@ def test_prepare_writes_failed_manifest_when_required_evidence_cannot_be_recover
 
     prepare_financebench(
         tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+        scope=fixture_scope(question_count=1),
     )
     assert (tmp_path / "financebench" / "prepared.json").exists()
 
     with pytest.raises(RuntimeError, match="FinanceBench preparation failed"):
-        prepare_financebench(tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""])
+        prepare_financebench(
+            tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""],
+            scope=fixture_scope(question_count=1),
+        )
 
     manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "failed"
@@ -373,7 +507,10 @@ def test_prepare_records_sha256_for_empty_fetched_source_on_failure(tmp_path: Pa
         raise AssertionError(url)
 
     with pytest.raises(RuntimeError, match="FinanceBench preparation failed"):
-        prepare_financebench(tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""])
+        prepare_financebench(
+            tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""],
+            scope=fixture_scope(question_count=1),
+        )
 
     manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["source_sha256"]["financebench_open_source.jsonl"] == hashlib.sha256(b"").hexdigest()
@@ -417,11 +554,17 @@ def test_financebench_llamacpp_configs_validate_without_importing_pypdf():
     assert full.runtime.max_workers == 1
 
 
-def test_financebench_adapter_runs_through_amem_with_fake_provider(tmp_path: Path):
+def test_financebench_adapter_runs_through_amem_with_fake_provider(monkeypatch, tmp_path: Path):
+    from memorybench.datasets.financebench import FinanceBenchAdapter
     from memorybench.config import MemoryBenchConfig
     from memorybench.runner import ExperimentRunner
 
     prepared_path = write_prepared(tmp_path)
+    monkeypatch.setitem(
+        component_catalog()["dataset"]._items,
+        "financebench",
+        lambda: FinanceBenchAdapter(fixture_scope()),
+    )
     config = MemoryBenchConfig.model_validate({
         "experiment": {"id": "financebench-fake"},
         "pipeline": {

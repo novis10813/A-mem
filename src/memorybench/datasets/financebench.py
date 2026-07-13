@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from memorybench.schemas import (
     DatasetBundle,
@@ -19,7 +20,40 @@ PREPARED_SCHEMA_VERSION = "memorybench/financebench/v1"
 PREPARATION_MANIFEST_SCHEMA_VERSION = "memorybench/financebench-preparation/v1"
 
 
+@dataclass(frozen=True)
+class FinanceBenchScope:
+    question_count: int
+    document_count: int
+
+    def __post_init__(self) -> None:
+        if self.question_count < 1 or self.document_count < 1:
+            raise ValueError("FinanceBench scope counts must be at least 1")
+
+    def validate(self, document_names: Sequence[str], question_ids: Sequence[str]) -> None:
+        duplicate_question_ids = sorted({
+            question_id for question_id in question_ids if question_ids.count(question_id) > 1
+        })
+        if duplicate_question_ids:
+            raise ValueError(f"duplicate FinanceBench financebench_id {duplicate_question_ids[0]}")
+        if len(set(document_names)) != len(document_names):
+            raise ValueError("duplicate FinanceBench document name in prepared dataset")
+        if len(question_ids) != self.question_count:
+            raise ValueError(
+                f"FinanceBench scope expected {self.question_count} unique question IDs, got {len(question_ids)}"
+            )
+        if len(document_names) != self.document_count:
+            raise ValueError(
+                f"FinanceBench scope expected {self.document_count} document names, got {len(document_names)}"
+            )
+
+
+PUBLIC_FINANCEBENCH_SCOPE = FinanceBenchScope(question_count=150, document_count=84)
+
+
 class FinanceBenchAdapter:
+    def __init__(self, scope: FinanceBenchScope = PUBLIC_FINANCEBENCH_SCOPE) -> None:
+        self.scope = scope
+
     def load(self, path: str | Path) -> DatasetBundle:
         prepared_path = Path(path)
         encoded = prepared_path.read_bytes()
@@ -37,8 +71,11 @@ class FinanceBenchAdapter:
         samples = []
         question_types: set[str] = set()
         reasoning_types: set[str] = set()
+        document_names = []
+        question_ids = []
         for document in sorted(documents, key=lambda item: str(item.get("doc_name", ""))):
             doc_name = self._string(document, "doc_name", "prepared document")
+            document_names.append(doc_name)
             metadata = self._mapping(document, "metadata", f"prepared document {doc_name}")
             turns = tuple(self._turn(raw, doc_name) for raw in self._list(document, "turns", doc_name))
             if not turns:
@@ -47,6 +84,7 @@ class FinanceBenchAdapter:
             for raw in self._list(document, "questions", doc_name):
                 question, question_type, reasoning = self._question(raw, doc_name)
                 questions.append(question)
+                question_ids.append(question.question_id)
                 question_types.add(question_type)
                 if reasoning is not None:
                     reasoning_types.add(reasoning)
@@ -56,6 +94,7 @@ class FinanceBenchAdapter:
                 questions=tuple(questions),
                 metadata=dict(metadata),
             ))
+        self.scope.validate(document_names, question_ids)
         dimensions = [TaxonomyDimension(
             name="question_type",
             values=tuple(sorted(question_types)),
@@ -82,6 +121,8 @@ class FinanceBenchAdapter:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"FinanceBench manifest is not valid JSON: {manifest_path}") from exc
+        if not isinstance(manifest, Mapping):
+            raise ValueError(f"FinanceBench manifest must be an object: {manifest_path}")
         if manifest.get("schema_version") != PREPARATION_MANIFEST_SCHEMA_VERSION:
             raise ValueError(f"Unsupported FinanceBench manifest schema: {manifest_path}")
         if manifest.get("status") != "completed":
