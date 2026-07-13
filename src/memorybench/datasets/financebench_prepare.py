@@ -1,12 +1,312 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import tempfile
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
+from memorybench.artifacts import atomic_json
+from memorybench.datasets.financebench import (
+    PREPARED_SCHEMA_VERSION,
+    PREPARATION_MANIFEST_SCHEMA_VERSION,
+)
 
 
 MAX_PAGE_WORDS = 1200
+UPSTREAM_REPOSITORY = "patronus-ai/financebench"
+UPSTREAM_COMMIT_URL = "https://api.github.com/repos/patronus-ai/financebench/commits/main"
+UPSTREAM_RAW_ROOT = "https://raw.githubusercontent.com/patronus-ai/financebench"
+
+
+@dataclass(frozen=True)
+class PreparationResult:
+    output: Path
+    manifest_path: Path
+    revision: str
+    document_count: int
+
+
+def fetch_url(url: str) -> bytes:
+    request = Request(url, headers={"User-Agent": "memorybench-financebench-preparer"})
+    with urlopen(request, timeout=120) as response:
+        return response.read()
+
+
+def prepare_financebench(
+    output: Path,
+    workers: int = 4,
+    *,
+    fetch: Callable[[str], bytes] = fetch_url,
+    extractor: Callable[[Path], list[str]] | None = None,
+) -> PreparationResult:
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    output = Path(output)
+    source_dir = output / "source"
+    pdf_dir = source_dir / "pdfs"
+    manifest_path = output / "manifest.json"
+    prepared_path = output / "prepared.json"
+    reports: dict[str, dict[str, Any]] = {}
+    revision = ""
+    question_bytes = b""
+    metadata_bytes = b""
+    extraction_version = "unavailable"
+    try:
+        extraction_version = pypdf_version() if extractor is None else "injected"
+        revision = resolve_revision(fetch)
+        question_bytes = fetch(raw_url(revision, "data/financebench_open_source.jsonl"))
+        metadata_bytes = fetch(raw_url(revision, "data/financebench_document_information.jsonl"))
+        atomic_bytes(source_dir / "financebench_open_source.jsonl", question_bytes)
+        atomic_bytes(source_dir / "financebench_document_information.jsonl", metadata_bytes)
+        questions = read_jsonl_bytes(question_bytes, "financebench_open_source.jsonl")
+        metadata = read_jsonl_bytes(metadata_bytes, "financebench_document_information.jsonl")
+        questions_by_doc = source_questions_by_document(questions)
+        metadata_by_doc = source_metadata_by_document(metadata)
+        missing_metadata = sorted(set(questions_by_doc) - set(metadata_by_doc))
+        if missing_metadata:
+            raise ValueError(f"FinanceBench metadata missing documents: {', '.join(missing_metadata)}")
+        previous = read_manifest(manifest_path)
+        reports = {
+            doc_name: {
+                "status": "pending",
+                "pdf_url": raw_url(revision, f"pdfs/{doc_name}.pdf"),
+                "document_source_url": required_string(metadata_by_doc[doc_name], "doc_link", doc_name),
+            }
+            for doc_name in sorted(questions_by_doc)
+        }
+        pdfs, failures = download_pdfs(
+            revision, sorted(questions_by_doc), pdf_dir, previous, fetch, workers,
+        )
+        for doc_name, path in pdfs.items():
+            reports[doc_name].update({"status": "downloaded", "pdf_sha256": sha256_file(path)})
+        if failures:
+            for doc_name, failure in failures.items():
+                reports[doc_name].update(failure)
+            raise ValueError(f"PDF download failed for {', '.join(sorted(failures))}")
+        pages_by_doc, failures = extract_documents(pdfs, extractor, workers)
+        if failures:
+            for doc_name, failure in failures.items():
+                reports[doc_name].update(failure)
+            raise ValueError(f"PDF extraction failed for {', '.join(sorted(failures))}")
+        documents = []
+        for doc_name in sorted(questions_by_doc):
+            try:
+                document, report = build_prepared_document(
+                    doc_name, metadata_by_doc[doc_name], questions_by_doc[doc_name], pages_by_doc[doc_name],
+                )
+            except Exception as exc:
+                reports[doc_name].update({
+                    "status": "failed",
+                    "stage": "normalize",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                raise
+            report = {**reports[doc_name], **report}
+            report.update({
+                "status": "completed",
+                "pdf_sha256": sha256_file(pdfs[doc_name]),
+            })
+            reports[doc_name] = report
+            documents.append(document)
+        prepared = {
+            "schema_version": PREPARED_SCHEMA_VERSION,
+            "source": {"repository": UPSTREAM_REPOSITORY, "revision": revision},
+            "documents": documents,
+        }
+        atomic_json(prepared_path, prepared)
+        manifest = manifest_payload(
+            "completed", revision, question_bytes, metadata_bytes, reports,
+            prepared_sha256=sha256_file(prepared_path), extraction_version=extraction_version,
+        )
+        atomic_json(manifest_path, manifest)
+        return PreparationResult(output, manifest_path, revision, len(documents))
+    except Exception as exc:
+        atomic_json(manifest_path, manifest_payload(
+            "failed", revision, question_bytes, metadata_bytes, reports,
+            error=f"{type(exc).__name__}: {exc}", extraction_version=extraction_version,
+        ))
+        raise RuntimeError(f"FinanceBench preparation failed: {exc}") from exc
+
+
+def resolve_revision(fetch: Callable[[str], bytes]) -> str:
+    payload = json.loads(fetch(UPSTREAM_COMMIT_URL).decode("utf-8"))
+    revision = payload.get("sha")
+    if not isinstance(revision, str) or not revision:
+        raise ValueError("FinanceBench upstream commit response has no sha")
+    return revision
+
+
+def raw_url(revision: str, relative_path: str) -> str:
+    return f"{UPSTREAM_RAW_ROOT}/{revision}/{quote(relative_path, safe='/')}"
+
+
+def atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_jsonl_bytes(payload: bytes, source_name: str) -> list[dict[str, Any]]:
+    result = []
+    for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid JSONL in {source_name} line {line_number}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"JSONL object required in {source_name} line {line_number}")
+        result.append(value)
+    return result
+
+
+def read_manifest(path: Path) -> Mapping[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, Mapping) else {}
+
+
+def download_pdfs(
+    revision: str,
+    doc_names: Sequence[str],
+    pdf_dir: Path,
+    previous: Mapping[str, Any],
+    fetch: Callable[[str], bytes],
+    workers: int,
+) -> tuple[dict[str, Path], dict[str, dict[str, str]]]:
+    prior_reports = previous.get("documents", {}) if isinstance(previous.get("documents"), Mapping) else {}
+
+    def download(doc_name: str) -> tuple[str, Path]:
+        path = pdf_dir / f"{doc_name}.pdf"
+        prior = prior_reports.get(doc_name, {})
+        expected = prior.get("pdf_sha256") if isinstance(prior, Mapping) else None
+        if path.is_file() and isinstance(expected, str) and sha256_file(path) == expected:
+            return doc_name, path
+        payload = fetch(raw_url(revision, f"pdfs/{doc_name}.pdf"))
+        if not payload.startswith(b"%PDF-"):
+            raise ValueError(f"FinanceBench source is not a PDF for {doc_name}")
+        atomic_bytes(path, payload)
+        return doc_name, path
+
+    result: dict[str, Path] = {}
+    failures: dict[str, dict[str, str]] = {}
+    if workers == 1:
+        for doc_name in doc_names:
+            try:
+                name, path = download(doc_name)
+                result[name] = path
+            except Exception as exc:
+                failures[doc_name] = {
+                    "status": "failed", "stage": "download", "error": f"{type(exc).__name__}: {exc}",
+                }
+        return result, failures
+    with ThreadPoolExecutor(max_workers=min(workers, len(doc_names))) as executor:
+        futures = {executor.submit(download, doc_name): doc_name for doc_name in doc_names}
+        for future in as_completed(futures):
+            requested = futures[future]
+            try:
+                doc_name, path = future.result()
+                result[doc_name] = path
+            except Exception as exc:
+                failures[requested] = {
+                    "status": "failed", "stage": "download", "error": f"{type(exc).__name__}: {exc}",
+                }
+    return result, failures
+
+
+def extract_documents(
+    pdfs: Mapping[str, Path],
+    extractor: Callable[[Path], list[str]] | None,
+    workers: int,
+) -> tuple[dict[str, list[str]], dict[str, dict[str, str]]]:
+    active_extractor = extractor or extract_layout_pages
+    items = sorted(pdfs.items())
+    result: dict[str, list[str]] = {}
+    failures: dict[str, dict[str, str]] = {}
+    if workers == 1:
+        for doc_name, path in items:
+            try:
+                result[doc_name] = active_extractor(path)
+            except Exception as exc:
+                failures[doc_name] = {
+                    "status": "failed", "stage": "extract", "error": f"{type(exc).__name__}: {exc}",
+                }
+        return result, failures
+    executor_type = ProcessPoolExecutor if extractor is None else ThreadPoolExecutor
+    with executor_type(max_workers=min(workers, len(items))) as executor:
+        futures = {executor.submit(active_extractor, path): doc_name for doc_name, path in items}
+        for future in as_completed(futures):
+            doc_name = futures[future]
+            try:
+                result[doc_name] = future.result()
+            except Exception as exc:
+                failures[doc_name] = {
+                    "status": "failed", "stage": "extract", "error": f"{type(exc).__name__}: {exc}",
+                }
+    return result, failures
+
+
+def manifest_payload(
+    status: str,
+    revision: str,
+    question_bytes: bytes,
+    metadata_bytes: bytes,
+    reports: Mapping[str, Mapping[str, Any]],
+    *,
+    prepared_sha256: str | None = None,
+    error: str | None = None,
+    extraction_version: str,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PREPARATION_MANIFEST_SCHEMA_VERSION,
+        "status": status,
+        "upstream": {"repository": UPSTREAM_REPOSITORY, "revision": revision},
+        "source_sha256": {
+            "financebench_open_source.jsonl": hashlib.sha256(question_bytes).hexdigest() if question_bytes else None,
+            "financebench_document_information.jsonl": hashlib.sha256(metadata_bytes).hexdigest() if metadata_bytes else None,
+        },
+        "parameters": {
+            "max_page_words": MAX_PAGE_WORDS,
+            "extraction_mode": "layout",
+            "pypdf_version": extraction_version,
+        },
+        "required_documents": sorted(reports),
+        "documents": {name: reports[name] for name in sorted(reports)},
+    }
+    if prepared_sha256 is not None:
+        payload["prepared_sha256"] = prepared_sha256
+    if error is not None:
+        payload["error"] = error
+    return payload
 
 
 def source_questions_by_document(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:

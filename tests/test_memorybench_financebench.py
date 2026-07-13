@@ -156,3 +156,143 @@ def test_source_validation_rejects_cross_document_or_unrecoverable_evidence():
     empty_evidence["evidence"][0]["evidence_text_full_page"] = ""
     with pytest.raises(ValueError, match="required evidence page 0 has no text"):
         build_prepared_document("Acme_2023_10K", raw_metadata(), [empty_evidence], [""], max_page_words=1200)
+
+
+def test_prepare_downloads_only_referenced_pdfs_and_reuses_verified_pdf(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    questions = [raw_question("financebench_id_00005", 0)]
+    metadata = [raw_metadata(), {
+        "doc_name": "Unused_2023_10K", "company": "Unused", "gics_sector": "Utilities",
+        "doc_type": "10k", "doc_period": 2023, "doc_link": "https://example.test/unused.pdf",
+    }]
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("data/financebench_open_source.jsonl"):
+            return (json.dumps(questions[0]) + "\n").encode("utf-8")
+        if url.endswith("data/financebench_document_information.jsonl"):
+            return "".join(json.dumps(row) + "\n" for row in metadata).encode("utf-8")
+        if url.endswith("pdfs/Acme_2023_10K.pdf"):
+            return b"%PDF-1.7 fake financebench fixture"
+        raise AssertionError(url)
+
+    result = prepare_financebench(
+        tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+    )
+
+    assert result.document_count == 1
+    assert (result.output / "prepared.json").exists()
+    manifest = json.loads((result.output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["required_documents"] == ["Acme_2023_10K"]
+    assert manifest["documents"]["Acme_2023_10K"]["pdf_url"].endswith("pdfs/Acme_2023_10K.pdf")
+    assert any(url.endswith("pdfs/Acme_2023_10K.pdf") for url in calls)
+    assert not any("Unused_2023_10K.pdf" in url for url in calls)
+
+    prepare_financebench(
+        tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+    )
+    assert sum(url.endswith("pdfs/Acme_2023_10K.pdf") for url in calls) == 1
+
+
+def test_prepare_writes_identical_prepared_json_for_one_and_two_workers(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    first_question = raw_question("financebench_id_00007", 0)
+    second_question = raw_question("financebench_id_00008", 0)
+    second_question["doc_name"] = "Beta_2023_10K"
+    second_question["evidence"][0]["doc_name"] = "Beta_2023_10K"
+    second_metadata = {
+        "doc_name": "Beta_2023_10K", "company": "Beta", "gics_sector": "Utilities",
+        "doc_type": "10k", "doc_period": 2023, "doc_link": "https://example.test/beta.pdf",
+    }
+
+    def fetch(url: str) -> bytes:
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("financebench_open_source.jsonl"):
+            return (json.dumps(first_question) + "\n" + json.dumps(second_question) + "\n").encode("utf-8")
+        if url.endswith("financebench_document_information.jsonl"):
+            return (json.dumps(raw_metadata()) + "\n" + json.dumps(second_metadata) + "\n").encode("utf-8")
+        if url.endswith("Acme_2023_10K.pdf") or url.endswith("Beta_2023_10K.pdf"):
+            return b"%PDF-1.7 fake financebench fixture"
+        raise AssertionError(url)
+
+    first = prepare_financebench(
+        tmp_path / "one", workers=1, fetch=fetch, extractor=lambda path: [f"Revenue for {path.stem}."],
+    )
+    second = prepare_financebench(
+        tmp_path / "two", workers=2, fetch=fetch, extractor=lambda path: [f"Revenue for {path.stem}."],
+    )
+
+    assert (first.output / "prepared.json").read_bytes() == (second.output / "prepared.json").read_bytes()
+
+
+def test_prepare_checks_for_pypdf_before_any_network_fetch(monkeypatch, tmp_path: Path):
+    import memorybench.datasets.financebench_prepare as preparation
+
+    monkeypatch.setattr(
+        preparation,
+        "pypdf_version",
+        lambda: (_ for _ in ()).throw(RuntimeError("FinanceBench preparation requires pypdf. Run: uv sync --extra financebench")),
+    )
+    fetched = False
+
+    def fetch(url: str) -> bytes:
+        nonlocal fetched
+        fetched = True
+        return b""
+
+    with pytest.raises(RuntimeError, match="requires pypdf"):
+        preparation.prepare_financebench(tmp_path / "financebench", fetch=fetch)
+
+    assert fetched is False
+
+
+def test_prepare_writes_failed_manifest_when_required_evidence_cannot_be_recovered(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    question = raw_question("financebench_id_00006", 0)
+    question["evidence"][0]["evidence_text_full_page"] = ""
+
+    def fetch(url: str) -> bytes:
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("financebench_open_source.jsonl"):
+            return (json.dumps(question) + "\n").encode("utf-8")
+        if url.endswith("financebench_document_information.jsonl"):
+            return (json.dumps(raw_metadata()) + "\n").encode("utf-8")
+        if url.endswith("Acme_2023_10K.pdf"):
+            return b"%PDF-1.7 fake financebench fixture"
+        raise AssertionError(url)
+
+    with pytest.raises(RuntimeError, match="FinanceBench preparation failed"):
+        prepare_financebench(tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""])
+
+    manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["documents"]["Acme_2023_10K"]["status"] == "failed"
+    assert not (tmp_path / "financebench" / "prepared.json").exists()
+
+
+def test_prepare_financebench_cli_prints_result(monkeypatch, capsys, tmp_path: Path):
+    from memorybench.cli import main
+    from memorybench.datasets.financebench_prepare import PreparationResult
+
+    def fake_prepare(output: Path, workers: int):
+        assert output == tmp_path / "prepared"
+        assert workers == 3
+        return PreparationResult(output, output / "manifest.json", "revision123", 1)
+
+    monkeypatch.setattr("memorybench.datasets.financebench_prepare.prepare_financebench", fake_prepare)
+
+    assert main(["prepare-financebench", "--output", str(tmp_path / "prepared"), "--workers", "3"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "documents": 1,
+        "manifest": str(tmp_path / "prepared" / "manifest.json"),
+        "output": str(tmp_path / "prepared"),
+        "revision": "revision123",
+    }
