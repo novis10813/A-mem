@@ -36,6 +36,7 @@ def component_catalog() -> dict[str, Registry]:
         return _CATALOG
 
     from .components import TurnChunker, TurnRAGConstruction, answer, build_context, metric_scores, staged_retrieve
+    from .datasets.financebench import FinanceBenchAdapter
     from .datasets.locomo import LoCoMoAdapter
     from .methods.amem.construction import AMemConstruction
     from .methods.amem.context import build_amem_context
@@ -49,6 +50,7 @@ def component_catalog() -> dict[str, Registry]:
             "qa", "metric", "llm_provider", "retrieval_stage",
         )
     }
+    catalog["dataset"].register("financebench", FinanceBenchAdapter)
     catalog["dataset"].register("locomo", LoCoMoAdapter)
     catalog["construction"].register("amem", AMemConstruction)
     catalog["construction"].register("turn_rag", TurnRAGConstruction)
