@@ -9,14 +9,7 @@ from pydantic import ValidationError
 
 from .config import load_config
 from .runner import ExperimentRunner
-
-
-COMPONENTS = {
-    "dataset": ["locomo"], "construction": ["amem", "turn_rag"], "chunker": ["turn"],
-    "retrieval": ["agentic", "staged"], "retrieval_stage": ["bm25", "embedding", "embedding_rerank", "cross_encoder", "limit", "query_transform"],
-    "context": ["amem", "graph", "records"], "qa": ["extractive", "robust"],
-    "metric": ["exact_match"], "llm_provider": ["fake", "ollama", "openai", "sglang", "vllm"],
-}
+from .registry import public_component_names
 
 
 def parser() -> argparse.ArgumentParser:
@@ -37,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "list-components":
-            print(json.dumps(COMPONENTS, indent=2, sort_keys=True))
+            print(json.dumps(public_component_names(), indent=2, sort_keys=True))
             return 0
         if args.command == "validate":
             config = load_config(args.config)

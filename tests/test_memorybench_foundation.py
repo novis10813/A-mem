@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from memorybench.config import MemoryBenchConfig, load_config
 from memorybench.datasets.locomo import LoCoMoAdapter
 from memorybench.registry import Registry
+from memorybench.schemas import Question
 
 
 def minimal_config(**pipeline_overrides):
@@ -40,6 +41,13 @@ def test_retrieve_only_requires_memory_source():
         MemoryBenchConfig.model_validate(payload)
 
 
+def test_config_requires_unique_pipeline_stages():
+    with pytest.raises(ValidationError, match="at least one stage"):
+        MemoryBenchConfig.model_validate(minimal_config(stages=[]))
+    with pytest.raises(ValidationError, match="duplicate pipeline stage"):
+        MemoryBenchConfig.model_validate(minimal_config(stages=["construction", "construction"]))
+
+
 def test_registry_reports_unknown_adapter():
     registry = Registry("chunker")
     registry.register("turn", object)
@@ -59,10 +67,12 @@ def test_locomo_adapter_emits_stable_ids_taxonomy_and_turn_evidence(tmp_path: Pa
     path = tmp_path / "locomo.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     bundle = LoCoMoAdapter().load(path)
-    assert bundle.taxonomy.dimensions[0].values == ("1", "2", "3", "4", "5")
+    assert bundle.taxonomy.dimensions[0].values == (
+        "multi_hop", "temporal", "open_domain", "single_hop", "adversarial",
+    )
     assert bundle.samples[0].questions[0].question_id == "locomo:0:0"
     assert bundle.samples[0].turns[0].evidence_id == "D1:1"
-    assert bundle.samples[0].questions[0].labels == {"question_type": "2"}
+    assert bundle.samples[0].questions[0].labels == {"question_type": ("temporal",)}
 
 
 def test_yaml_load_round_trip(tmp_path: Path):
@@ -70,3 +80,35 @@ def test_yaml_load_round_trip(tmp_path: Path):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(minimal_config()), encoding="utf-8")
     assert load_config(path).experiment.id == "unit"
+
+
+def test_selection_accepts_categories_and_question_labels_are_multi_value():
+    payload = minimal_config()
+    payload["pipeline"]["retrieve_qa"]["selection"] = {
+        "categories": ["temporal", "multi_hop"],
+    }
+    config = MemoryBenchConfig.model_validate(payload)
+    assert config.pipeline.retrieve_qa.selection.categories == ("temporal", "multi_hop")
+
+    question = Question(
+        question_id="dataset:q1",
+        text="question",
+        reference="answer",
+        labels={"capability": ["temporal", "multi_hop"]},
+    )
+    assert question.labels["capability"] == ("temporal", "multi_hop")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["pipeline"]["construction"].pop("chunker"), "turn_rag requires"),
+        (lambda value: value["pipeline"]["retrieve_qa"].update({"qa": {"adapter": "robust"}}), "robust QA requires"),
+        (lambda value: value["pipeline"]["retrieve_qa"]["retrieval"].update({"stages": []}), "at least one stage"),
+    ],
+)
+def test_config_rejects_incomplete_component_compositions(mutation, message):
+    payload = minimal_config()
+    mutation(payload)
+    with pytest.raises(ValidationError, match=message):
+        MemoryBenchConfig.model_validate(payload)

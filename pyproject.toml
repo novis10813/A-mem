@@ -5,9 +5,11 @@ description = "Unified component-oriented agentic memory experiment framework"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "nltk>=3.9.4",
     "numpy>=2.4.6",
     "pyyaml>=6.0.3",
     "pydantic>=2.12",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.scripts]
@@ -16,8 +18,8 @@ memorybench = "memorybench.cli:main"
 [project.optional-dependencies]
 dashboard = ["gradio>=5.0", "networkx>=3.4", "plotly>=6.0"]
 providers = ["litellm>=1.88.1", "ollama>=0.6.2", "openai>=2.41.1"]
-retrieval = ["rank-bm25>=0.2.2", "sentence-transformers>=5.5.1"]
-metrics = ["bert-score>=0.3.13", "nltk>=3.9.4", "rouge-score>=0.1.2"]
+retrieval = ["sentence-transformers>=5.5.1"]
+metrics = ["bert-score>=0.3.13", "rouge-score>=0.1.2"]
 dev = ["pytest>=9.0.3"]
 
 [build-system]

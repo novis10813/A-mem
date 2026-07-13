@@ -34,7 +34,7 @@ class Question(Schema):
     text: str
     reference: str
     evidence_ids: tuple[str, ...] = ()
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 class DatasetSample(Schema):
@@ -97,6 +97,7 @@ class MemoryStore(Schema):
 class UsageRecord(Schema):
     phase: str
     component: str
+    provider: str | None = None
     model: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -112,7 +113,7 @@ class QAResult(Schema):
     question: str
     reference: str
     prediction: str = ""
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     retrieval: dict[str, Any] = Field(default_factory=dict)
     tool_traces: tuple[dict[str, Any], ...] = ()
     context: dict[str, Any] = Field(default_factory=dict)

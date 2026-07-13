@@ -1,0 +1,68 @@
+experiment:
+  id: amem_fake_smoke
+  description: Offline A-Mem construction and QA characterization smoke run
+pipeline:
+  stages: [construction, retrieve_qa]
+  dataset:
+    adapter: locomo
+    path: data/locomo10.json
+  construction:
+    adapter: amem
+    runs: 1
+    llm:
+      provider: fake
+      model: scripted-amem
+      params:
+        responses:
+          - |-
+            KEYWORDS: Caroline, conversation
+            CONTEXT: Caroline greeted Melanie
+            TAGS: greeting
+          - |-
+            KEYWORDS: Melanie, work
+            CONTEXT: Melanie discussed work and family
+            TAGS: work, family
+          - |-
+            DECISION: NO_EVOLUTION
+            REASON: separate details
+    params:
+      retrieval_mode: bm25
+      keyword_pruning_mode: nltk
+    selection:
+      sample_limit: 1
+      turn_limit: 2
+  retrieve_qa:
+    runs: 1
+    retrieval:
+      adapter: staged
+      stages:
+        - adapter: query_transform
+          top_k: 2
+          llm:
+            provider: fake
+            model: fake-query-generator
+            params:
+              response: LGBTQ support group
+        - adapter: bm25
+          top_k: 2
+    context:
+      adapter: amem
+    qa:
+      adapter: robust
+      llm:
+        provider: fake
+        model: fake-answerer
+        params:
+          response: 7 May 2023
+    metrics:
+      - adapter: exact_match
+      - adapter: f1
+      - adapter: bleu1
+    selection:
+      sample_limit: 1
+      question_limit: 1
+runtime:
+  artifact_root: artifacts/experiments
+  max_workers: 1
+  resume: true
+  on_error: continue

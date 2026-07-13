@@ -28,6 +28,8 @@ pipeline:
       adapter: extractive
     metrics:
       - adapter: exact_match
+      - adapter: f1
+      - adapter: bleu1
     selection:
       sample_limit: 1
       question_limit: 1

@@ -883,9 +883,11 @@ name = "memorybench"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "nltk" },
     { name = "numpy" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "rank-bm25" },
 ]
 
 [package.optional-dependencies]
@@ -899,7 +901,6 @@ dev = [
 ]
 metrics = [
     { name = "bert-score" },
-    { name = "nltk" },
     { name = "rouge-score" },
 ]
 providers = [
@@ -908,7 +909,6 @@ providers = [
     { name = "openai" },
 ]
 retrieval = [
-    { name = "rank-bm25" },
     { name = "sentence-transformers" },
 ]
 
@@ -918,7 +918,7 @@ requires-dist = [
     { name = "gradio", marker = "extra == 'dashboard'", specifier = ">=5.0" },
     { name = "litellm", marker = "extra == 'providers'", specifier = ">=1.88.1" },
     { name = "networkx", marker = "extra == 'dashboard'", specifier = ">=3.4" },
-    { name = "nltk", marker = "extra == 'metrics'", specifier = ">=3.9.4" },
+    { name = "nltk", specifier = ">=3.9.4" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "ollama", marker = "extra == 'providers'", specifier = ">=0.6.2" },
     { name = "openai", marker = "extra == 'providers'", specifier = ">=2.41.1" },
@@ -926,7 +926,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "rank-bm25", marker = "extra == 'retrieval'", specifier = ">=0.2.2" },
+    { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "rouge-score", marker = "extra == 'metrics'", specifier = ">=0.1.2" },
     { name = "sentence-transformers", marker = "extra == 'retrieval'", specifier = ">=5.5.1" },
 ]

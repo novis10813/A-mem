@@ -9,6 +9,14 @@ from memorybench.schemas import (
 
 
 class LoCoMoAdapter:
+    CATEGORY_NAMES = {
+        1: "multi_hop",
+        2: "temporal",
+        3: "open_domain",
+        4: "single_hop",
+        5: "adversarial",
+    }
+
     def load(self, path: str | Path) -> DatasetBundle:
         with Path(path).open(encoding="utf-8") as handle:
             raw_samples = json.load(handle)
@@ -35,12 +43,13 @@ class LoCoMoAdapter:
                     question_id=f"locomo:{sample_index}:{qa_index}", text=str(item["question"]),
                     reference=str(item.get("adversarial_answer") if item.get("category") == 5 else item.get("answer", "")),
                     evidence_ids=tuple(item.get("evidence", ())),
-                    labels={"question_type": str(item["category"])} if item.get("category") is not None else {},
+                    labels={"question_type": (self.CATEGORY_NAMES[int(item["category"])],)}
+                    if item.get("category") is not None else {},
                 ) for qa_index, item in enumerate(raw.get("qa", ()))
             )
             samples.append(DatasetSample(sample_id=f"locomo:{sample_index}", turns=tuple(turns), questions=questions))
         taxonomy = DatasetTaxonomy(dimensions=(TaxonomyDimension(
-            name="question_type", values=("1", "2", "3", "4", "5"), source="LoCoMo category",
+            name="question_type", values=tuple(self.CATEGORY_NAMES.values()), source="LoCoMo category",
         ),))
         return DatasetBundle(dataset_id="locomo", taxonomy=taxonomy, samples=tuple(samples))
 

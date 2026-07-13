@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
+import urllib.request
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -19,7 +21,7 @@ class CompletionResponse(BaseModel):
     raw: dict[str, Any] | None = None
 
 
-def complete(config: LLMConfig, prompt: str) -> CompletionResponse:
+def complete(config: LLMConfig, prompt: str, *, temperature: float | None = None) -> CompletionResponse:
     started = time.perf_counter()
     if config.provider == "fake":
         text = str(config.params.get("response", ""))
@@ -30,15 +32,48 @@ def complete(config: LLMConfig, prompt: str) -> CompletionResponse:
         )
     if config.provider == "ollama":
         import ollama
-        response = ollama.chat(model=config.model, messages=[{"role": "user", "content": prompt}], options=config.params)
+        options = dict(config.params)
+        if temperature is not None:
+            options["temperature"] = temperature
+        response = ollama.chat(model=config.model, messages=[{"role": "user", "content": prompt}], options=options)
         usage = response if isinstance(response, dict) else response.model_dump()
         text = usage["message"]["content"]
         prompt_tokens, completion_tokens = usage.get("prompt_eval_count"), usage.get("eval_count")
+    elif config.provider == "sglang":
+        params = dict(config.params)
+        base_url = params.pop("base_url", None)
+        if base_url is None:
+            host = params.pop("host", "http://localhost")
+            port = int(params.pop("port", 30000))
+            base_url = f"{host}:{port}"
+        if temperature is not None:
+            params["temperature"] = temperature
+        payload = json.dumps({"text": prompt, "sampling_params": params}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base_url.rstrip('/')}/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as result:
+            body = json.loads(result.read().decode("utf-8"))
+        text = str(body.get("text", ""))
+        prompt_tokens = body.get("prompt_tokens")
+        completion_tokens = body.get("completion_tokens")
     else:
         from openai import OpenAI
         params = dict(config.params)
         base_url = params.pop("base_url", None)
-        client = OpenAI(base_url=base_url) if base_url else OpenAI()
+        api_key = params.pop("api_key", None)
+        if config.provider == "vllm" and base_url is None:
+            host = params.pop("host", "http://localhost")
+            port = int(params.pop("port", 30000))
+            base_url = f"{host}:{port}/v1"
+        if temperature is not None:
+            params["temperature"] = temperature
+        client = (
+            OpenAI(base_url=base_url, api_key=api_key or "EMPTY")
+            if base_url else OpenAI(api_key=api_key)
+        )
         response = client.chat.completions.create(model=config.model, messages=[{"role": "user", "content": prompt}], **params)
         text = response.choices[0].message.content or ""
         prompt_tokens = response.usage.prompt_tokens if response.usage else None

@@ -8,6 +8,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .registry import component_catalog
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -19,6 +21,7 @@ class SelectionConfig(StrictModel):
     sample_limit: int | None = Field(default=None, ge=1)
     turn_limit: int | None = Field(default=None, ge=1)
     question_limit: int | None = Field(default=None, ge=1)
+    categories: tuple[str, ...] | None = None
 
 
 class ComponentConfig(StrictModel):
@@ -49,6 +52,8 @@ class ConstructionConfig(ComponentConfig):
 
 class RetrievalStageConfig(ComponentConfig):
     top_k: int = Field(default=10, ge=1)
+    llm: LLMConfig | None = None
+    query: Literal["current", "original_question"] = "current"
 
 
 class RetrievalConfig(ComponentConfig):
@@ -63,6 +68,11 @@ class QAConfig(ComponentConfig):
     llm: LLMConfig | None = None
 
 
+class MemorySourceConfig(StrictModel):
+    experiment_id: str
+    construction_runs: Literal["all"] | tuple[int, ...] = "all"
+
+
 class RetrieveQAConfig(StrictModel):
     runs: int = Field(default=1, ge=1)
     retrieval: RetrievalConfig
@@ -70,7 +80,7 @@ class RetrieveQAConfig(StrictModel):
     qa: QAConfig
     metrics: tuple[ComponentConfig, ...] = ()
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
-    memory_source: Path | None = None
+    memory_source: MemorySourceConfig | None = None
 
 
 class PipelineConfig(StrictModel):
@@ -81,6 +91,10 @@ class PipelineConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_phases(self):
+        if not self.stages:
+            raise ValueError("pipeline.stages requires at least one stage")
+        if len(set(self.stages)) != len(self.stages):
+            raise ValueError("duplicate pipeline stage")
         if "construction" in self.stages and self.construction is None:
             raise ValueError("construction stage requires pipeline.construction")
         if "retrieve_qa" in self.stages and self.retrieve_qa is None:
@@ -111,31 +125,31 @@ class MemoryBenchConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_adapters(self):
-        allowed = {
-            "dataset": {"locomo"}, "construction": {"amem", "turn_rag"},
-            "chunker": {"turn"}, "retrieval": {"staged", "agentic"},
-            "retrieval_stage": {"bm25", "embedding", "embedding_rerank", "cross_encoder", "limit", "query_transform"},
-            "context": {"records", "amem", "graph"}, "qa": {"extractive", "robust", "failing"},
-            "metric": {"exact_match"},
-        }
+        catalog = component_catalog()
         components = [("dataset", self.pipeline.dataset.adapter)]
         if self.pipeline.construction:
-            components.append(("construction", self.pipeline.construction.adapter))
-            if self.pipeline.construction.chunker:
-                components.append(("chunker", self.pipeline.construction.chunker.adapter))
+            construction = self.pipeline.construction
+            components.append(("construction", construction.adapter))
+            if construction.adapter == "turn_rag" and construction.chunker is None:
+                raise ValueError("turn_rag requires a chunker")
+            if construction.adapter == "amem" and construction.llm is None:
+                raise ValueError("amem construction requires an llm")
+            if construction.chunker:
+                components.append(("chunker", construction.chunker.adapter))
         if self.pipeline.retrieve_qa:
             stage = self.pipeline.retrieve_qa
+            if not stage.retrieval.stages:
+                raise ValueError("staged retrieval requires at least one stage")
+            if stage.qa.adapter == "robust" and stage.qa.llm is None:
+                raise ValueError("robust QA requires an llm")
             components.extend((
                 ("retrieval", stage.retrieval.adapter), ("context", stage.context.adapter),
                 ("qa", stage.qa.adapter),
             ))
             components.extend(("retrieval_stage", item.adapter) for item in stage.retrieval.stages)
             components.extend(("metric", item.adapter) for item in stage.metrics)
-            if stage.retrieval.adapter == "agentic" and stage.retrieval.stages:
-                raise ValueError("agentic retrieval uses tools/policy params, not linear stages")
         for family, adapter in components:
-            if adapter not in allowed[family]:
-                raise ValueError(f"Unknown {family} adapter '{adapter}'")
+            catalog[family].get(adapter)
         return self
 
     @property

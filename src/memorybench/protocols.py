@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Protocol, Sequence
 
-from .schemas import DatasetBundle, DatasetSample, MemoryRecord, MemoryStore, QAResult, Question
+from .schemas import DatasetBundle, DatasetSample, MemoryRecord, MemoryStore, Question
 
 
 class DatasetAdapter(Protocol):
