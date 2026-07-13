@@ -16,7 +16,7 @@ dependencies = [
 memorybench = "memorybench.cli:main"
 
 [project.optional-dependencies]
-financebench = ["pypdf>=6.0"]
+financebench = ["pypdf>=6.0", "cryptography>=3.1"]
 dashboard = ["gradio>=5.0", "networkx>=3.4", "plotly>=6.0"]
 providers = ["litellm>=1.88.1", "ollama>=0.6.2", "openai>=2.41.1"]
 retrieval = ["sentence-transformers>=5.5.1"]

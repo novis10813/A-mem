@@ -1,10 +1,19 @@
 import hashlib
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from memorybench.registry import component_catalog
+
+
+def test_financebench_extra_declares_pdf_crypto_dependencies():
+    with (Path(__file__).parents[1] / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+
+    dependencies = set(project["project"]["optional-dependencies"]["financebench"])
+    assert {"pypdf>=6.0", "cryptography>=3.1"} <= dependencies
 
 
 def write_prepared(tmp_path: Path, *, manifest_status: str = "completed") -> Path:
