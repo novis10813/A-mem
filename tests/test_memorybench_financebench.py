@@ -355,3 +355,60 @@ def test_prepare_financebench_cli_prints_result(monkeypatch, capsys, tmp_path: P
         "output": str(tmp_path / "prepared"),
         "revision": "revision123",
     }
+
+
+def test_financebench_llamacpp_configs_validate_without_importing_pypdf():
+    from memorybench.config import load_config
+
+    smoke = load_config("configs/financebench_llamacpp_smoke.yaml")
+    full = load_config("configs/financebench_llamacpp.yaml")
+
+    assert smoke.pipeline.dataset.adapter == "financebench"
+    assert smoke.pipeline.construction.llm.provider == "vllm"
+    assert smoke.pipeline.construction.llm.params == {"host": "http://127.0.0.1", "port": 8080}
+    assert smoke.pipeline.construction.selection.sample_limit == 1
+    assert smoke.pipeline.retrieve_qa.selection.question_limit == 1
+    assert full.pipeline.construction.selection.sample_limit is None
+    assert full.runtime.max_workers == 1
+
+
+def test_financebench_adapter_runs_through_amem_with_fake_provider(tmp_path: Path):
+    from memorybench.config import MemoryBenchConfig
+    from memorybench.runner import ExperimentRunner
+
+    prepared_path = write_prepared(tmp_path)
+    config = MemoryBenchConfig.model_validate({
+        "experiment": {"id": "financebench-fake"},
+        "pipeline": {
+            "stages": ["construction", "retrieve_qa"],
+            "dataset": {"adapter": "financebench", "path": str(prepared_path)},
+            "construction": {
+                "adapter": "amem",
+                "llm": {
+                    "provider": "fake", "model": "fake-amem",
+                    "params": {"responses": [
+                        "KEYWORDS: revenue\\nCONTEXT: Revenue was $10\\nTAGS: revenue",
+                    ]},
+                },
+                "params": {"retrieval_mode": "bm25", "keyword_pruning_mode": "simple"},
+            },
+            "retrieve_qa": {
+                "retrieval": {"adapter": "staged", "stages": [{"adapter": "bm25", "top_k": 1}]},
+                "context": {"adapter": "amem"},
+                "qa": {
+                    "adapter": "robust",
+                    "llm": {"provider": "fake", "model": "fake-qa", "params": {"response": "$10"}},
+                },
+                "metrics": [{"adapter": "exact_match"}],
+                "selection": {"sample_limit": 1, "question_limit": 1},
+            },
+        },
+        "runtime": {"artifact_root": str(tmp_path / "artifacts"), "on_error": "stop"},
+    })
+
+    outcome = ExperimentRunner(config).run()
+
+    assert outcome.exit_code == 0
+    results = (outcome.artifact_dir / "retrieve_qa/construction_000/run_000/results.jsonl").read_text(encoding="utf-8")
+    assert '"prediction": "$10"' in results
+    assert '"financebench:Acme_2023_10K:page:0"' in results

@@ -1,0 +1,51 @@
+experiment:
+  id: financebench_llamacpp_smoke
+  description: One-document FinanceBench A-Mem characterization through local llama.cpp
+pipeline:
+  stages: [construction, retrieve_qa]
+  dataset:
+    adapter: financebench
+    path: artifacts/datasets/financebench/prepared.json
+  construction:
+    adapter: amem
+    runs: 1
+    llm:
+      provider: vllm
+      model: llama3.2
+      params:
+        host: http://127.0.0.1
+        port: 8080
+    params:
+      retrieval_mode: bm25
+      keyword_pruning_mode: simple
+    selection:
+      sample_limit: 1
+  retrieve_qa:
+    runs: 1
+    retrieval:
+      adapter: staged
+      stages:
+        - adapter: bm25
+          top_k: 5
+    context:
+      adapter: amem
+    qa:
+      adapter: robust
+      llm:
+        provider: vllm
+        model: llama3.2
+        params:
+          host: http://127.0.0.1
+          port: 8080
+    metrics:
+      - adapter: exact_match
+      - adapter: f1
+      - adapter: bleu1
+    selection:
+      sample_limit: 1
+      question_limit: 1
+runtime:
+  artifact_root: artifacts/experiments
+  max_workers: 1
+  resume: true
+  on_error: continue

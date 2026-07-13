@@ -37,3 +37,16 @@ skips only completed units with the same config fingerprint and retries failed u
 For runs without network services, use `configs/turn_rag_smoke.yaml` and
 `configs/amem_fake_smoke.yaml`. See [the architecture and config guide](docs/memorybench_architecture.md)
 for component contracts, phase selection, external memory sources, taxonomy, and artifact layout.
+
+## FinanceBench (local PDF corpus)
+
+Prepare the public FinanceBench question-linked PDF corpus once. Preparation downloads 84 source PDFs for the 150 public questions, extracts complete pages, and writes only ignored artifacts. Benchmark runs are offline after this step.
+
+```bash
+uv sync --extra dev --extra providers --extra financebench
+uv run python -m memorybench prepare-financebench --output artifacts/datasets/financebench --workers 4
+uv run python -m memorybench validate --config configs/financebench_llamacpp_smoke.yaml
+uv run python -m memorybench run --config configs/financebench_llamacpp_smoke.yaml
+```
+
+The FinanceBench configs use the existing `vllm` provider label solely to call a llama.cpp OpenAI-compatible server at `http://127.0.0.1:8080/v1` with model `llama3.2`; this branch does not add a llama.cpp provider. Start full runs with `runtime.max_workers: 1`, then measure two and four workers before changing the configuration. The included exact match, F1, and BLEU-1 values are diagnostic metrics, not official FinanceBench scores.
