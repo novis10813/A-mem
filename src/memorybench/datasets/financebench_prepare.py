@@ -69,7 +69,11 @@ def prepare_financebench(
         questions = read_jsonl_bytes(question_bytes, "financebench_open_source.jsonl")
         metadata = read_jsonl_bytes(metadata_bytes, "financebench_document_information.jsonl")
         questions_by_doc = source_questions_by_document(questions)
-        metadata_by_doc = source_metadata_by_document(metadata)
+        referenced_metadata = [
+            row for row in metadata
+            if isinstance(row.get("doc_name"), str) and row["doc_name"] in questions_by_doc
+        ]
+        metadata_by_doc = source_metadata_by_document(referenced_metadata)
         missing_metadata = sorted(set(questions_by_doc) - set(metadata_by_doc))
         if missing_metadata:
             raise ValueError(f"FinanceBench metadata missing documents: {', '.join(missing_metadata)}")

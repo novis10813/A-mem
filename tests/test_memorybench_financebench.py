@@ -198,6 +198,39 @@ def test_prepare_downloads_only_referenced_pdfs_and_reuses_verified_pdf(tmp_path
     assert sum(url.endswith("pdfs/Acme_2023_10K.pdf") for url in calls) == 1
 
 
+def test_prepare_ignores_duplicate_unreferenced_metadata_rows(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    metadata = [raw_metadata(), {
+        "doc_name": "FOOTLOCKER_2023_annualreport", "company": "Foot Locker",
+        "gics_sector": "Consumer Discretionary", "doc_type": "10k", "doc_period": 2023,
+        "doc_link": "https://example.test/footlocker.pdf",
+    }, {
+        "doc_name": "FOOTLOCKER_2023_annualreport", "company": "Foot Locker",
+        "gics_sector": "Consumer Discretionary", "doc_type": "10k", "doc_period": 2022,
+        "doc_link": "https://example.test/footlocker.pdf",
+    }]
+
+    def fetch(url: str) -> bytes:
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("financebench_open_source.jsonl"):
+            return (json.dumps(raw_question("financebench_id_00010", 0)) + "\n").encode("utf-8")
+        if url.endswith("financebench_document_information.jsonl"):
+            return "".join(json.dumps(row) + "\n" for row in metadata).encode("utf-8")
+        if url.endswith("pdfs/Acme_2023_10K.pdf"):
+            return b"%PDF-1.7 fake financebench fixture"
+        raise AssertionError(url)
+
+    result = prepare_financebench(
+        tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+    )
+
+    assert result.document_count == 1
+    manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["required_documents"] == ["Acme_2023_10K"]
+
+
 def test_prepare_refetches_pdf_when_upstream_revision_changes(tmp_path: Path):
     from memorybench.datasets.financebench_prepare import prepare_financebench
 
