@@ -64,6 +64,63 @@ def write_prepared(tmp_path: Path, *, manifest_status: str = "completed") -> Pat
     return path
 
 
+def write_two_document_prepared(tmp_path: Path) -> Path:
+    documents = [
+        {
+            "doc_name": "Acme_2023_10K",
+            "metadata": {
+                "company": "Acme", "gics_sector": "Industrials", "doc_type": "10k",
+                "doc_period": 2023, "source_url": "https://example.test/acme.pdf",
+            },
+            "turns": [{
+                "turn_id": "financebench:Acme_2023_10K:page:0",
+                "evidence_id": "financebench:Acme_2023_10K:page:0",
+                "page_index": 0,
+                "part_index": None,
+                "text": "Document: Acme_2023_10K\nPDF page index: 0\n\nRevenue was $10.",
+            }],
+            "questions": [{
+                "question_id": "financebench_id_00001", "text": "What was Acme revenue?",
+                "reference": "$10", "evidence_ids": ["financebench:Acme_2023_10K:page:0"],
+                "question_type": "metrics-generated", "question_reasoning": None,
+            }],
+        },
+        {
+            "doc_name": "Beta_2023_10K",
+            "metadata": {
+                "company": "Beta", "gics_sector": "Utilities", "doc_type": "10k",
+                "doc_period": 2023, "source_url": "https://example.test/beta.pdf",
+            },
+            "turns": [{
+                "turn_id": "financebench:Beta_2023_10K:page:1",
+                "evidence_id": "financebench:Beta_2023_10K:page:1",
+                "page_index": 1,
+                "part_index": None,
+                "text": "Document: Beta_2023_10K\nPDF page index: 1\n\nOperating income was $20.",
+            }],
+            "questions": [{
+                "question_id": "financebench_id_00002", "text": "What was Beta operating income?",
+                "reference": "$20", "evidence_ids": ["financebench:Beta_2023_10K:page:1"],
+                "question_type": "metrics-generated", "question_reasoning": None,
+            }],
+        },
+    ]
+    prepared = {
+        "schema_version": "memorybench/financebench/v1",
+        "source": {"repository": "patronus-ai/financebench", "revision": "deadbeef"},
+        "documents": documents,
+    }
+    path = tmp_path / "prepared.json"
+    encoded = json.dumps(prepared, sort_keys=True).encode("utf-8")
+    path.write_bytes(encoded)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "schema_version": "memorybench/financebench-preparation/v1",
+        "status": "completed",
+        "prepared_sha256": hashlib.sha256(encoded).hexdigest(),
+    }), encoding="utf-8")
+    return path
+
+
 def test_financebench_adapter_emits_document_samples_and_native_taxonomy(tmp_path: Path):
     from memorybench.datasets.financebench import FinanceBenchAdapter
 
@@ -600,3 +657,90 @@ def test_financebench_adapter_runs_through_amem_with_fake_provider(monkeypatch, 
     results = (outcome.artifact_dir / "retrieve_qa/construction_000/run_000/results.jsonl").read_text(encoding="utf-8")
     assert '"prediction": "$10"' in results
     assert '"financebench:Acme_2023_10K:page:0"' in results
+
+
+def test_two_document_financebench_runner_is_cpu_only_and_preserves_page_evidence(
+    monkeypatch, tmp_path: Path,
+):
+    import builtins
+    import socket
+    import sys
+    import urllib.request
+
+    from memorybench.config import MemoryBenchConfig
+    from memorybench.datasets.financebench import FinanceBenchAdapter
+    from memorybench.runner import ExperimentRunner
+
+    prepared_path = write_two_document_prepared(tmp_path)
+    monkeypatch.setitem(
+        component_catalog()["dataset"]._items,
+        "financebench",
+        lambda: FinanceBenchAdapter(fixture_scope(question_count=2, document_count=2)),
+    )
+
+    real_import = builtins.__import__
+
+    def reject_gpu_or_pdf_import(name, *args, **kwargs):
+        if name == "pypdf" or name.startswith("pypdf."):
+            raise AssertionError("pypdf must not be imported by the runner")
+        if name == "llama_cpp" or name.startswith("llama_cpp."):
+            raise AssertionError("llama.cpp must not be imported by the runner")
+        return real_import(name, *args, **kwargs)
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("network access must not be used by the fake-provider runner")
+
+    monkeypatch.setattr(builtins, "__import__", reject_gpu_or_pdf_import)
+    monkeypatch.setattr(socket.socket, "connect", reject_network)
+    monkeypatch.setattr(urllib.request, "urlopen", reject_network)
+
+    config = MemoryBenchConfig.model_validate({
+        "experiment": {"id": "financebench-fake-parallel"},
+        "pipeline": {
+            "stages": ["construction", "retrieve_qa"],
+            "dataset": {"adapter": "financebench", "path": str(prepared_path)},
+            "construction": {
+                "adapter": "amem",
+                "llm": {
+                    "provider": "fake", "model": "fake-amem",
+                    "params": {"responses": [
+                        "KEYWORDS: revenue\\nCONTEXT: Revenue was $10\\nTAGS: revenue",
+                    ]},
+                },
+                "params": {"retrieval_mode": "bm25", "keyword_pruning_mode": "simple"},
+            },
+            "retrieve_qa": {
+                "retrieval": {"adapter": "staged", "stages": [{"adapter": "bm25", "top_k": 1}]},
+                "context": {"adapter": "amem"},
+                "qa": {
+                    "adapter": "robust",
+                    "llm": {"provider": "fake", "model": "fake-qa", "params": {"response": "$10"}},
+                },
+                "metrics": [{"adapter": "exact_match"}],
+            },
+        },
+        "runtime": {"artifact_root": str(tmp_path / "artifacts"), "max_workers": 2, "on_error": "stop"},
+    })
+
+    outcome = ExperimentRunner(config).run()
+
+    assert outcome.exit_code == 0
+    assert json.loads((outcome.artifact_dir / "manifest.json").read_text(encoding="utf-8"))["status"] == "completed"
+    construction_status = json.loads(
+        (outcome.artifact_dir / "construction/run_000/status.json").read_text(encoding="utf-8")
+    )
+    assert construction_status["status"] == "completed"
+    assert construction_status["completed_samples"] == 2
+    run_dir = outcome.artifact_dir / "retrieve_qa/construction_000/run_000"
+    rows = [json.loads(line) for line in (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["status"] for row in rows] == ["completed", "completed"]
+    assert {
+        row["sample_id"]: row["retrieval"]["items"][0]["evidence_refs"]
+        for row in rows
+    } == {
+        "financebench:Acme_2023_10K": ["financebench:Acme_2023_10K:page:0"],
+        "financebench:Beta_2023_10K": ["financebench:Beta_2023_10K:page:1"],
+    }
+    assert not (run_dir / "errors.jsonl").read_text(encoding="utf-8").strip()
+    assert "pypdf" not in sys.modules
+    assert not any(name == "llama_cpp" or name.startswith("llama_cpp.") for name in sys.modules)
