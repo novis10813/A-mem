@@ -358,10 +358,13 @@ def test_prepare_financebench_cli_prints_result(monkeypatch, capsys, tmp_path: P
 
 
 def test_financebench_llamacpp_configs_validate_without_importing_pypdf():
+    import sys
+
     from memorybench.config import load_config
 
     smoke = load_config("configs/financebench_llamacpp_smoke.yaml")
     full = load_config("configs/financebench_llamacpp.yaml")
+    assert "pypdf" not in sys.modules
 
     assert smoke.pipeline.dataset.adapter == "financebench"
     assert smoke.pipeline.construction.llm.provider == "vllm"
