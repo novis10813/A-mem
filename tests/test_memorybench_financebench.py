@@ -198,6 +198,41 @@ def test_prepare_downloads_only_referenced_pdfs_and_reuses_verified_pdf(tmp_path
     assert sum(url.endswith("pdfs/Acme_2023_10K.pdf") for url in calls) == 1
 
 
+def test_prepare_refetches_pdf_when_upstream_revision_changes(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    question = raw_question("financebench_id_00009", 0)
+    revisions = iter(("revision123", "revision456"))
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        if url.endswith("/commits/main"):
+            return json.dumps({"sha": next(revisions)}).encode("utf-8")
+        if url.endswith("financebench_open_source.jsonl"):
+            return (json.dumps(question) + "\n").encode("utf-8")
+        if url.endswith("financebench_document_information.jsonl"):
+            return (json.dumps(raw_metadata()) + "\n").encode("utf-8")
+        if url.endswith("pdfs/Acme_2023_10K.pdf"):
+            return b"%PDF-1.7 revision-specific financebench fixture"
+        raise AssertionError(url)
+
+    prepare_financebench(
+        tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+    )
+    prepare_financebench(
+        tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+    )
+
+    pdf_calls = [url for url in calls if url.endswith("pdfs/Acme_2023_10K.pdf")]
+    assert pdf_calls == [
+        "https://raw.githubusercontent.com/patronus-ai/financebench/revision123/pdfs/Acme_2023_10K.pdf",
+        "https://raw.githubusercontent.com/patronus-ai/financebench/revision456/pdfs/Acme_2023_10K.pdf",
+    ]
+    manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["upstream"]["revision"] == "revision456"
+
+
 def test_prepare_writes_identical_prepared_json_for_one_and_two_workers(tmp_path: Path):
     from memorybench.datasets.financebench_prepare import prepare_financebench
 
@@ -269,6 +304,11 @@ def test_prepare_writes_failed_manifest_when_required_evidence_cannot_be_recover
             return b"%PDF-1.7 fake financebench fixture"
         raise AssertionError(url)
 
+    prepare_financebench(
+        tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: ["Revenue was $10."],
+    )
+    assert (tmp_path / "financebench" / "prepared.json").exists()
+
     with pytest.raises(RuntimeError, match="FinanceBench preparation failed"):
         prepare_financebench(tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""])
 
@@ -276,6 +316,25 @@ def test_prepare_writes_failed_manifest_when_required_evidence_cannot_be_recover
     assert manifest["status"] == "failed"
     assert manifest["documents"]["Acme_2023_10K"]["status"] == "failed"
     assert not (tmp_path / "financebench" / "prepared.json").exists()
+
+
+def test_prepare_records_sha256_for_empty_fetched_source_on_failure(tmp_path: Path):
+    from memorybench.datasets.financebench_prepare import prepare_financebench
+
+    def fetch(url: str) -> bytes:
+        if url.endswith("/commits/main"):
+            return b'{"sha":"revision123"}'
+        if url.endswith("financebench_open_source.jsonl"):
+            return b""
+        if url.endswith("financebench_document_information.jsonl"):
+            return (json.dumps(raw_metadata()) + "\n").encode("utf-8")
+        raise AssertionError(url)
+
+    with pytest.raises(RuntimeError, match="FinanceBench preparation failed"):
+        prepare_financebench(tmp_path / "financebench", workers=1, fetch=fetch, extractor=lambda path: [""])
+
+    manifest = json.loads((tmp_path / "financebench" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_sha256"]["financebench_open_source.jsonl"] == hashlib.sha256(b"").hexdigest()
 
 
 def test_prepare_financebench_cli_prints_result(monkeypatch, capsys, tmp_path: Path):

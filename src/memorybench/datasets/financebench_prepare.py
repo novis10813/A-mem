@@ -56,8 +56,8 @@ def prepare_financebench(
     prepared_path = output / "prepared.json"
     reports: dict[str, dict[str, Any]] = {}
     revision = ""
-    question_bytes = b""
-    metadata_bytes = b""
+    question_bytes: bytes | None = None
+    metadata_bytes: bytes | None = None
     extraction_version = "unavailable"
     try:
         extraction_version = pypdf_version() if extractor is None else "injected"
@@ -129,6 +129,7 @@ def prepare_financebench(
         atomic_json(manifest_path, manifest)
         return PreparationResult(output, manifest_path, revision, len(documents))
     except Exception as exc:
+        prepared_path.unlink(missing_ok=True)
         atomic_json(manifest_path, manifest_payload(
             "failed", revision, question_bytes, metadata_bytes, reports,
             error=f"{type(exc).__name__}: {exc}", extraction_version=extraction_version,
@@ -204,14 +205,28 @@ def download_pdfs(
     workers: int,
 ) -> tuple[dict[str, Path], dict[str, dict[str, str]]]:
     prior_reports = previous.get("documents", {}) if isinstance(previous.get("documents"), Mapping) else {}
+    prior_upstream = previous.get("upstream")
+    same_revision = (
+        isinstance(prior_upstream, Mapping)
+        and prior_upstream.get("repository") == UPSTREAM_REPOSITORY
+        and prior_upstream.get("revision") == revision
+    )
 
     def download(doc_name: str) -> tuple[str, Path]:
         path = pdf_dir / f"{doc_name}.pdf"
         prior = prior_reports.get(doc_name, {})
         expected = prior.get("pdf_sha256") if isinstance(prior, Mapping) else None
-        if path.is_file() and isinstance(expected, str) and sha256_file(path) == expected:
+        current_url = raw_url(revision, f"pdfs/{doc_name}.pdf")
+        can_resume = (
+            same_revision
+            and isinstance(prior, Mapping)
+            and prior.get("pdf_url") == current_url
+            and prior.get("status") in {"downloaded", "completed"}
+            and isinstance(expected, str)
+        )
+        if path.is_file() and can_resume and sha256_file(path) == expected:
             return doc_name, path
-        payload = fetch(raw_url(revision, f"pdfs/{doc_name}.pdf"))
+        payload = fetch(current_url)
         if not payload.startswith(b"%PDF-"):
             raise ValueError(f"FinanceBench source is not a PDF for {doc_name}")
         atomic_bytes(path, payload)
@@ -278,8 +293,8 @@ def extract_documents(
 def manifest_payload(
     status: str,
     revision: str,
-    question_bytes: bytes,
-    metadata_bytes: bytes,
+    question_bytes: bytes | None,
+    metadata_bytes: bytes | None,
     reports: Mapping[str, Mapping[str, Any]],
     *,
     prepared_sha256: str | None = None,
@@ -291,8 +306,8 @@ def manifest_payload(
         "status": status,
         "upstream": {"repository": UPSTREAM_REPOSITORY, "revision": revision},
         "source_sha256": {
-            "financebench_open_source.jsonl": hashlib.sha256(question_bytes).hexdigest() if question_bytes else None,
-            "financebench_document_information.jsonl": hashlib.sha256(metadata_bytes).hexdigest() if metadata_bytes else None,
+            "financebench_open_source.jsonl": hashlib.sha256(question_bytes).hexdigest() if question_bytes is not None else None,
+            "financebench_document_information.jsonl": hashlib.sha256(metadata_bytes).hexdigest() if metadata_bytes is not None else None,
         },
         "parameters": {
             "max_page_words": MAX_PAGE_WORDS,
