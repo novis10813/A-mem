@@ -23,10 +23,3 @@ output/
 # Large/reference documents should be linked from README instead.
 *.pdf
 /papers/
-docs/
-!docs/
-docs/*
-!docs/retrieval_reranker_design_zh.md
-!docs/baseline_comparison_zh.md
-!docs/benchmark_component_usage.md
-!docs/memorybench_architecture.md
