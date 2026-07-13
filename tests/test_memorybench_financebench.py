@@ -79,3 +79,80 @@ def test_financebench_adapter_rejects_unprepared_or_tampered_input(tmp_path: Pat
     path.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="prepared_sha256 mismatch"):
         FinanceBenchAdapter().load(path)
+
+
+def raw_question(question_id: str, page_index: int, *, reasoning: str | None = "Information extraction"):
+    return {
+        "financebench_id": question_id,
+        "doc_name": "Acme_2023_10K",
+        "question": "What was revenue?",
+        "answer": "$10",
+        "question_type": "metrics-generated",
+        "question_reasoning": reasoning,
+        "evidence": [{
+            "doc_name": "Acme_2023_10K",
+            "evidence_page_num": page_index,
+            "evidence_text": "Revenue was $10.",
+            "evidence_text_full_page": "Revenue was $10.",
+        }],
+    }
+
+
+def raw_metadata():
+    return {
+        "doc_name": "Acme_2023_10K",
+        "company": "Acme",
+        "gics_sector": "Industrials",
+        "doc_type": "10k",
+        "doc_period": 2023,
+        "doc_link": "https://example.test/acme.pdf",
+    }
+
+
+def test_build_prepared_document_uses_page_fallback_and_page_evidence_ids():
+    from memorybench.datasets.financebench_prepare import build_prepared_document
+
+    document, report = build_prepared_document(
+        "Acme_2023_10K", raw_metadata(), [raw_question("financebench_id_00001", 1)],
+        ["Cover page", ""], max_page_words=1200,
+    )
+
+    assert [turn["evidence_id"] for turn in document["turns"]] == [
+        "financebench:Acme_2023_10K:page:0",
+        "financebench:Acme_2023_10K:page:1",
+    ]
+    assert document["turns"][1]["text"].endswith("Revenue was $10.")
+    assert report["evidence_fallback_pages"] == [1]
+    assert document["questions"][0]["evidence_ids"] == ["financebench:Acme_2023_10K:page:1"]
+
+
+def test_page_split_preserves_one_page_evidence_id_and_blank_line_boundaries():
+    from memorybench.datasets.financebench_prepare import build_prepared_document
+
+    document, _ = build_prepared_document(
+        "Acme_2023_10K", raw_metadata(), [raw_question("financebench_id_00002", 0)],
+        ["one two three\n\nfour five six\n\nseven eight nine"], max_page_words=4,
+    )
+
+    assert [turn["turn_id"] for turn in document["turns"]] == [
+        "financebench:Acme_2023_10K:page:0:part:1",
+        "financebench:Acme_2023_10K:page:0:part:2",
+        "financebench:Acme_2023_10K:page:0:part:3",
+    ]
+    assert {turn["evidence_id"] for turn in document["turns"]} == {
+        "financebench:Acme_2023_10K:page:0"
+    }
+
+
+def test_source_validation_rejects_cross_document_or_unrecoverable_evidence():
+    from memorybench.datasets.financebench_prepare import build_prepared_document
+
+    cross_document = raw_question("financebench_id_00003", 0)
+    cross_document["evidence"][0]["doc_name"] = "Other_2023_10K"
+    with pytest.raises(ValueError, match="evidence doc_name"):
+        build_prepared_document("Acme_2023_10K", raw_metadata(), [cross_document], ["page"], max_page_words=1200)
+
+    empty_evidence = raw_question("financebench_id_00004", 0)
+    empty_evidence["evidence"][0]["evidence_text_full_page"] = ""
+    with pytest.raises(ValueError, match="required evidence page 0 has no text"):
+        build_prepared_document("Acme_2023_10K", raw_metadata(), [empty_evidence], [""], max_page_words=1200)
